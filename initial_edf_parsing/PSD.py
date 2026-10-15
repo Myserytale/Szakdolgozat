@@ -1,5 +1,5 @@
 import numpy as np
-import matplotlib.pyplot as plp
+import matplotlib.pyplot as plt
 
 from scipy.signal import welch, resample_poly
 
@@ -16,24 +16,26 @@ with pyedflib.EdfReader(str(edf_path)) as edf:
 
 hypnogram, artefacts, art_channels = load_hypart(hypart_path)
 
-
-def inspect_array(name, data):
-    arr = np.asarray(data)
-
-    print(f"\n{name}")
-    print("Type:", type(data))
-    print("Shape:", arr.shape)
-    print("Dtype:", arr.dtype)
-    print("First values:", arr.flat[:20])
-
-    if arr.size and arr.size < 1_000_000:
-        values, counts = np.unique(arr, return_counts=True)
-        print("Unique values:", list(zip(values[:30], counts[:30])))
-
-
-inspect_array("Hypnogram", hypnogram)
-inspect_array("Artefacts", artefacts)
-inspect_array("Artifact channels", art_channels)
-
-fs = 64
 seconds = 4
+
+nperseg = fs * seconds
+
+frequencies, psd = welch(
+    c3_signal,
+    fs=fs,
+    window="hann",
+    nperseg=nperseg,
+    noverlap=nperseg // 2,
+    scaling="density",
+)
+
+plt.figure(figsize=(10, 5))
+plt.semilogy(frequencies, psd)
+plt.xlim(0, 30)
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("PSD (signal units²/Hz)")
+plt.title("C3 — Whole-recording PSD")
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+plt.savefig("psd_plot.png", dpi=150)
