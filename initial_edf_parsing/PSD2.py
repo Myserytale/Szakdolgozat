@@ -15,13 +15,14 @@ with pyedflib.EdfReader(str(edf_path)) as edf:
     fs = int(edf.getSampleFrequency(c3_idx))
 
 hypnogram, artefacts, art_channels = load_hypart(hypart_path)
-C3_art_idx = art_channels.index("ArtiFFT C3-A2")
+P3_art_index = art_channels.index("ArtiFFT P3-A2")
 
 seconds = 4
 epoch_seconds = 10
 epoch_samples = fs * epoch_seconds
 nperseg = fs * seconds
 
+frequencies = np.fft.rfftfreq(nperseg, 1.0 / fs)
 psds = []
 
 n_epochs = len(c3_signal) // epoch_samples
@@ -32,11 +33,11 @@ for i in range(n_epochs):
 
     if not np.all(hypnogram[start:end] == 2):
         continue
-    if not np.all(artefacts[start:end, C3_art_idx] == 0):
+    if not np.all(artefacts[start:end, P3_art_index] == 0):
         continue
 
     segment = c3_signal[start:end]
-    frequencies, psd = welch(
+    _, psd = welch(
         segment,
         fs=fs,
         window="hann",
@@ -58,8 +59,8 @@ if psds:
     # Find peak in the spindle frequency band (11-16 Hz)
     spindle_mask = (f_sub >= 11) & (f_sub <= 16)
     peak_idx = np.argmax(p_sub[spindle_mask])
-    peak_freq = f_sub[spindle_mask][peak_idx]
-    peak_power = p_sub[spindle_mask][peak_idx]
+    peak_freq = float(f_sub[spindle_mask][peak_idx])
+    peak_power = float(p_sub[spindle_mask][peak_idx])
 
     plt.figure(figsize=(10, 5))
     plt.plot(f_sub, p_sub, linewidth=2, color="#1f77b4", label="C3 PSD")
@@ -88,11 +89,11 @@ if psds:
     plt.xticks(np.arange(8, 21, 1))
     plt.xlabel("Frequency (Hz)")
     plt.ylabel("PSD (signal units²/Hz)")
-    plt.title("C3 — Clean NREM2 Power Spectral Density (Zoomed: 8–20 Hz)")
+    plt.title("P3 — Clean NREM2 Power Spectral Density (Zoomed: 8–20 Hz)")
     plt.grid(True, alpha=0.3)
     plt.legend(frameon=True, loc="upper right")
     plt.tight_layout()
-    plt.savefig("psd_nrem2_zoomed.png", dpi=150)
+    plt.savefig("psd_nrem2_zoomedP3-A2.png", dpi=150)
     plt.show()
 else:
     print("No clean NREM2 epochs found.")

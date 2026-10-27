@@ -23,7 +23,7 @@ nperseg = fs * seconds
 C3_art_idx = art_channels.index("ArtiFFT C3-A2")
 
 is_stage2 = hypnogram == 2
-is_clean = artefacts[:, C3_art_idx] == 0
+is_clean = artefacts[:, C3_art_idx] <= 4
 
 good_data = is_clean & is_stage2
 data_notbest = is_stage2
@@ -41,7 +41,7 @@ frequencies, psd = welch(
 )
 
 plt.semilogy(frequencies, psd)
-plt.xlim(0, 30)
+plt.xlim(0, 10)
 plt.xlabel("Frequency (Hz)")
 plt.ylabel("PSD (signal units²/Hz)")
 plt.title("C3 — Whole-recording PSD")

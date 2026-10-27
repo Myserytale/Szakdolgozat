@@ -59,3 +59,8 @@ def load_hypart(file_path: Path | str):
 
     artefacts = np.array(art_channels).T  # Shape: (n_samples, n_channels)
     return hypnogram, artefacts, channels
+
+
+def decode_rle(values: np.ndarray, durations: np.ndarray) -> np.ndarray:
+    """Expands run-length encoded pairs (value, duration) into a flat array."""
+    return np.repeat(values, durations)
