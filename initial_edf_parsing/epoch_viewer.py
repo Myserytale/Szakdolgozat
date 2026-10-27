@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
+import yasa
 
 from reading_working import DATA_DIR, HYPART_DIR, load_hypart, read_edf
 
@@ -27,18 +28,14 @@ art_idx = art_channels.index(art_channel)
 is_n2 = (hypnogram == 2) & (artefacts[:, art_idx] == 0)
 
 # ==============================================================================
-# 2. Spindle Detection (Sigma 11-16 Hz & Hilbert Envelope)
+# 2. Spindle Detection: Custom SciPy & YASA
 # ==============================================================================
-print("Running spindle detection...")
-# 4th-order zero-phase bandpass filter (11 - 16 Hz)
+print("Running Custom SciPy detector...")
 sos = butter(4, [11, 16], btype="bandpass", fs=fs, output="sos")
 sigma = sosfiltfilt(sos, signal)
 envelope = np.abs(hilbert(sigma))
 
-# Baseline threshold during clean N2 (Mean + 1.5 * Std)
 thresh = np.mean(envelope[is_n2]) + 1.5 * np.std(envelope[is_n2])
-
-# Find supra-threshold intervals
 above = (envelope > thresh) & is_n2
 diff = np.diff(above.astype(np.int8))
 starts = np.where(diff == 1)[0] + 1
@@ -49,18 +46,46 @@ if above[0]:
 if above[-1]:
     ends = np.append(ends, len(above))
 
-# Filter by duration: 0.5s to 2.5s (AASM standard)
 min_samples = int(0.5 * fs)
 max_samples = int(2.5 * fs)
 
-spindles = []
+custom_spindles = []
 for s, e in zip(starts, ends):
     dur = (e - s) / fs
     if min_samples <= (e - s) <= max_samples:
-        peak_amp = float(np.max(np.abs(signal[s:e])))
-        spindles.append({"start": s, "end": e, "dur": dur, "peak_amp": peak_amp})
+        custom_spindles.append({"start": s, "end": e, "dur": dur})
 
-print(f"Detected {len(spindles)} sleep spindles in clean N2.")
+print("Running YASA detector...")
+sp_yasa = yasa.spindles_detect(
+    signal,
+    fs,
+    ch_names=[channel],
+    hypno=hypnogram,
+    include=(2,),
+    freq_sp=(11, 16),
+)
+df_yasa = sp_yasa.summary()
+
+yasa_spindles = []
+if df_yasa is not None and len(df_yasa) > 0:
+    for _, row in df_yasa.iterrows():
+        s_idx = int(row["Start"] * fs)
+        e_idx = int((row["Start"] + row["Duration"]) * fs)
+        if np.all(artefacts[s_idx:e_idx, art_idx] == 0):
+            yasa_spindles.append({
+                "start": s_idx,
+                "end": e_idx,
+                "dur": float(row["Duration"]),
+            })
+
+print(f"Detected: Custom={len(custom_spindles)} | YASA={len(yasa_spindles)} spindles in clean N2.")
+
+# Combined list for navigation
+all_spindles = custom_spindles + yasa_spindles
+
+# Toggle states for spindle overlays
+show_custom = True
+show_yasa = True
 
 # ==============================================================================
 # 3. Epoch Setup & Stage Mappings
@@ -94,16 +119,16 @@ current_epoch = 0
 # ==============================================================================
 # 4. Interactive Plot Setup
 # ==============================================================================
-fig, ax = plt.subplots(figsize=(13, 6))
-plt.subplots_adjust(bottom=0.20)  # Reserve room for buttons
+fig, ax = plt.subplots(figsize=(13, 6.2))
+plt.subplots_adjust(bottom=0.24)  # Room for navigation & toggle button rows
 
-(line,) = ax.plot(t, signal[:epoch_len], color="#1f77b4", linewidth=0.8)
+(line,) = ax.plot(t, signal[:epoch_len], color="#1f77b4", linewidth=0.8, label="C3 EEG")
 ax.set_xlim(0, epoch_sec)
 ax.set_xlabel("Time within epoch (seconds)", fontsize=11)
 ax.set_ylabel(r"Amplitude ($\mu V$)", fontsize=11)
 ax.grid(True, linestyle="--", alpha=0.35)
 
-# Container for spindle highlight spans and annotations
+# Container for dynamically drawn spindle spans and badges
 active_highlights = []
 
 
@@ -114,7 +139,7 @@ def clear_highlights():
 
 
 def update_view():
-    """Redraws the EEG trace and highlights spindles in the current epoch."""
+    """Redraws the EEG trace and overlays toggled spindle detections."""
     clear_highlights()
 
     start = current_epoch * epoch_len
@@ -141,43 +166,96 @@ def update_view():
     max_amp = max(float(np.max(np.abs(seg))) * 1.25, 75.0)
     ax.set_ylim(-max_amp, max_amp)
 
-    # Highlight spindles overlapping this epoch
-    epoch_spindles = 0
-    for sp in spindles:
-        if sp["end"] > start and sp["start"] < end:
-            epoch_spindles += 1
-            sp_t0 = max(0.0, (sp["start"] - start) / fs)
-            sp_t1 = min(float(epoch_sec), (sp["end"] - start) / fs)
+    # 1. Overlay Custom SciPy Spindles (Orange fill) if toggled ON
+    c_count = 0
+    if show_custom:
+        for sp in custom_spindles:
+            if sp["end"] > start and sp["start"] < end:
+                c_count += 1
+                sp_t0 = max(0.0, (sp["start"] - start) / fs)
+                sp_t1 = min(float(epoch_sec), (sp["end"] - start) / fs)
 
-            span = ax.axvspan(sp_t0, sp_t1, color="orange", alpha=0.35)
-            active_highlights.append(span)
+                span = ax.axvspan(
+                    sp_t0,
+                    sp_t1,
+                    color="orange",
+                    alpha=0.35,
+                    label="Custom Spindle" if c_count == 1 else "",
+                )
+                active_highlights.append(span)
 
-            # Text label above the spindle
-            txt = ax.text(
-                (sp_t0 + sp_t1) / 2,
-                max_amp * 0.82,
-                f"Spindle\n{sp['dur']:.2f}s",
-                ha="center",
-                va="center",
-                fontsize=8.5,
-                fontweight="bold",
-                color="#b35900",
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="orange", alpha=0.85),
-            )
-            active_highlights.append(txt)
+                txt = ax.text(
+                    (sp_t0 + sp_t1) / 2,
+                    max_amp * 0.82,
+                    f"Custom\n{sp['dur']:.2f}s",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    fontweight="bold",
+                    color="#b35900",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="orange", alpha=0.9),
+                )
+                active_highlights.append(txt)
 
-    spindle_str = f"Spindles: {epoch_spindles}" if epoch_spindles > 0 else "No spindles"
+    # 2. Overlay YASA Spindles (Dashed Cyan border / light fill) if toggled ON
+    y_count = 0
+    if show_yasa:
+        for sp in yasa_spindles:
+            if sp["end"] > start and sp["start"] < end:
+                y_count += 1
+                sp_t0 = max(0.0, (sp["start"] - start) / fs)
+                sp_t1 = min(float(epoch_sec), (sp["end"] - start) / fs)
+
+                span = ax.axvspan(
+                    sp_t0,
+                    sp_t1,
+                    facecolor="#d0edff",
+                    edgecolor="#007acc",
+                    linestyle="--",
+                    linewidth=1.8,
+                    alpha=0.40,
+                    label="YASA Spindle" if y_count == 1 else "",
+                )
+                active_highlights.append(span)
+
+                txt = ax.text(
+                    (sp_t0 + sp_t1) / 2,
+                    max_amp * 0.60,
+                    f"YASA\n{sp['dur']:.2f}s",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    fontweight="bold",
+                    color="#005580",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="#007acc", alpha=0.9),
+                )
+                active_highlights.append(txt)
+
+    # Build title string according to active toggles
+    parts = []
+    if show_custom:
+        parts.append(f"Custom ({c_count})")
+    if show_yasa:
+        parts.append(f"YASA ({y_count})")
+
+    spindle_str = f"Spindles: {', '.join(parts)}" if parts else "Spindles: (All OFF)"
 
     ax.set_title(
         f"Epoch {current_epoch + 1}/{n_epochs}  |  Time: {time_str}  |  {stage_name}  |  [{art_status}]  |  ★ {spindle_str}",
         fontsize=11.5,
         fontweight="bold",
     )
+
+    # Dynamic deduplicated legend
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc="upper right", frameon=True)
+
     fig.canvas.draw_idle()
 
 
 # ==============================================================================
-# 5. Navigation Controls & Callbacks
+# 5. Navigation Controls & Toggle Callbacks
 # ==============================================================================
 def next_epoch(event=None):
     global current_epoch
@@ -194,12 +272,20 @@ def prev_epoch(event=None):
 
 
 def next_spindle(event=None):
-    """Jumps directly to the next epoch that contains a detected sleep spindle."""
+    """Jumps directly to the next epoch containing ANY active spindle."""
     global current_epoch
+    active = []
+    if show_custom:
+        active.extend(custom_spindles)
+    if show_yasa:
+        active.extend(yasa_spindles)
+    if not active:
+        active = all_spindles
+
     for ep in range(current_epoch + 1, n_epochs):
         s = ep * epoch_len
         e = s + epoch_len
-        if any(sp["end"] > s and sp["start"] < e for sp in spindles):
+        if any(sp["end"] > s and sp["start"] < e for sp in active):
             current_epoch = ep
             update_view()
             return
@@ -219,6 +305,26 @@ def next_clean(event=None):
     print("No more clean epochs found ahead.")
 
 
+def toggle_custom(event=None):
+    """Toggles visibility of Custom SciPy spindles."""
+    global show_custom
+    show_custom = not show_custom
+    btn_custom.label.set_text(f"Custom: {'ON' if show_custom else 'OFF'}")
+    btn_custom.ax.set_facecolor("#ffe0b2" if show_custom else "#e0e0e0")
+    btn_custom.color = "#ffe0b2" if show_custom else "#e0e0e0"
+    update_view()
+
+
+def toggle_yasa(event=None):
+    """Toggles visibility of YASA spindles."""
+    global show_yasa
+    show_yasa = not show_yasa
+    btn_yasa.label.set_text(f"YASA: {'ON' if show_yasa else 'OFF'}")
+    btn_yasa.ax.set_facecolor("#d0edff" if show_yasa else "#e0e0e0")
+    btn_yasa.color = "#d0edff" if show_yasa else "#e0e0e0"
+    update_view()
+
+
 def on_key(event):
     """Keyboard shortcuts."""
     if event.key in ["right", "d"]:
@@ -229,15 +335,22 @@ def on_key(event):
         next_spindle()
     elif event.key in ["c", "C"]:
         next_clean()
+    elif event.key in ["1", "u", "U"]:
+        toggle_custom()
+    elif event.key in ["2", "y", "Y"]:
+        toggle_yasa()
 
 
 fig.canvas.mpl_connect("key_press_event", on_key)
 
-# Add Navigation Buttons
-ax_prev = plt.axes([0.10, 0.05, 0.16, 0.07])
-ax_next = plt.axes([0.28, 0.05, 0.16, 0.07])
-ax_clean = plt.axes([0.48, 0.05, 0.18, 0.07])
-ax_spind = plt.axes([0.68, 0.05, 0.22, 0.07])
+# ------------------------------------------------------------------------------
+# Buttons Setup (Two Rows)
+# ------------------------------------------------------------------------------
+# Row 1: Navigation Buttons
+ax_prev = plt.axes([0.10, 0.12, 0.16, 0.065])
+ax_next = plt.axes([0.28, 0.12, 0.16, 0.065])
+ax_clean = plt.axes([0.48, 0.12, 0.18, 0.065])
+ax_spind = plt.axes([0.68, 0.12, 0.22, 0.065])
 
 btn_prev = Button(ax_prev, "◀ Previous")
 btn_next = Button(ax_next, "Next ▶")
@@ -248,6 +361,16 @@ btn_prev.on_clicked(prev_epoch)
 btn_next.on_clicked(next_epoch)
 btn_clean.on_clicked(next_clean)
 btn_spind.on_clicked(next_spindle)
+
+# Row 2: Spindle Visibility Toggles
+ax_custom = plt.axes([0.28, 0.035, 0.21, 0.055])
+ax_yasa = plt.axes([0.51, 0.035, 0.21, 0.055])
+
+btn_custom = Button(ax_custom, "Custom: ON", color="#ffe0b2", hovercolor="#ffcc80")
+btn_yasa = Button(ax_yasa, "YASA: ON", color="#d0edff", hovercolor="#b3e0ff")
+
+btn_custom.on_clicked(toggle_custom)
+btn_yasa.on_clicked(toggle_yasa)
 
 # Start viewer
 if __name__ == "__main__":
