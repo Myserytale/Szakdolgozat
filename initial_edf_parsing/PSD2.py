@@ -1,42 +1,48 @@
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.signal import welch
 
-from scipy.signal import welch, resample_poly
+from reading_working import DATA_DIR, HYPART_DIR, load_hypart, read_edf
 
-from reading_working import *
+# 1. Settings & Channel Selection
+channel = "C3"
+art_channel = f"ArtiFFT {channel}-A2"
 
 edf_path = DATA_DIR / "BB0008_SP2.edf"
 hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
 
-with pyedflib.EdfReader(str(edf_path)) as edf:
-    labels = edf.getSignalLabels()
-    c3_idx = labels.index("C3")
-    c3_signal = edf.readSignal(c3_idx)
-    fs = int(edf.getSampleFrequency(c3_idx))
+# 2. Load Signal & Annotations
+edf_data = read_edf(edf_path, channels=[channel])
+signal = edf_data["signals"][channel]
+fs = int(edf_data["sample_rates"][0])
 
 hypnogram, artefacts, art_channels = load_hypart(hypart_path)
-P3_art_index = art_channels.index("ArtiFFT P3-A2")
+art_idx = art_channels.index(art_channel)
 
-seconds = 4
-epoch_seconds = 10
-epoch_samples = fs * epoch_seconds
-nperseg = fs * seconds
+# 3. Epoch Settings
+epoch_sec = 10
+epoch_samples = fs * epoch_sec
+
+welch_sec = 4
+nperseg = fs * welch_sec
 
 frequencies = np.fft.rfftfreq(nperseg, 1.0 / fs)
 psds = []
 
-n_epochs = len(c3_signal) // epoch_samples
+# 4. Epoch Segmentation & Welch PSD
+n_epochs = len(signal) // epoch_samples
 
 for i in range(n_epochs):
     start = i * epoch_samples
     end = start + epoch_samples
 
+    # Check for Stage 2 (NREM2) and absence of artifacts
     if not np.all(hypnogram[start:end] == 2):
         continue
-    if not np.all(artefacts[start:end, P3_art_index] == 0):
+    if not np.all(artefacts[start:end, art_idx] == 0):
         continue
 
-    segment = c3_signal[start:end]
+    segment = signal[start:end]
     _, psd = welch(
         segment,
         fs=fs,
@@ -45,9 +51,9 @@ for i in range(n_epochs):
         noverlap=nperseg // 2,
         scaling="density",
     )
-
     psds.append(psd)
 
+# 5. Plotting Spindle Peak in Sigma Band (8 - 20 Hz)
 if psds:
     mean_psd = np.mean(psds, axis=0)
 
@@ -63,12 +69,10 @@ if psds:
     peak_power = float(p_sub[spindle_mask][peak_idx])
 
     plt.figure(figsize=(10, 5))
-    plt.plot(f_sub, p_sub, linewidth=2, color="#1f77b4", label="C3 PSD")
+    plt.plot(f_sub, p_sub, linewidth=2, color="#1f77b4", label=f"{channel} PSD")
 
-    # Highlight spindle range and peak
-    plt.axvspan(
-        11, 16, color="orange", alpha=0.15, label="Sleep Spindle Band (11–16 Hz)"
-    )
+    # Highlight spindle range and detected peak
+    plt.axvspan(11, 16, color="orange", alpha=0.15, label="Sleep Spindle Band (11–16 Hz)")
     plt.axvline(
         peak_freq,
         color="crimson",
@@ -77,9 +81,9 @@ if psds:
         label=f"Spindle Peak ({peak_freq:.2f} Hz)",
     )
     plt.annotate(
-        f"Spindle Peak: {peak_freq:.2f} Hz\n({peak_power:.2f} signal units²/Hz)",
+        f"Spindle Peak: {peak_freq:.2f} Hz\n({peak_power:.2f} " + r"$\mu V^2 / Hz$)",
         xy=(peak_freq, peak_power),
-        xytext=(peak_freq + 1.2, peak_power + 0.3),
+        xytext=(peak_freq + 1.2, peak_power * 0.9),
         arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=6),
         fontweight="bold",
     )
@@ -88,12 +92,12 @@ if psds:
     plt.ylim(0, np.max(p_sub) * 1.15)
     plt.xticks(np.arange(8, 21, 1))
     plt.xlabel("Frequency (Hz)")
-    plt.ylabel("PSD (signal units²/Hz)")
-    plt.title("P3 — Clean NREM2 Power Spectral Density (Zoomed: 8–20 Hz)")
+    plt.ylabel(r"PSD ($\mu V^2 / Hz$)")
+    plt.title(f"{channel} — Clean NREM2 Power Spectral Density (Zoomed: 8–20 Hz)")
     plt.grid(True, alpha=0.3)
     plt.legend(frameon=True, loc="upper right")
     plt.tight_layout()
-    plt.savefig("psd_nrem2_zoomedP3-A2.png", dpi=150)
+    plt.savefig(f"psd_nrem2_zoomed_{channel}.png", dpi=150)
     plt.show()
 else:
     print("No clean NREM2 epochs found.")
