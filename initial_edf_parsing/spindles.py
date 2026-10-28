@@ -103,3 +103,32 @@ def detect_all_spindles(
     custom = detect_custom_spindles(signal, fs, is_n2)
     yasa_sp = detect_yasa_spindles(signal, fs, hypnogram, artefacts, art_idx)
     return custom, yasa_sp
+
+
+def create_spindle_mask(
+    n_samples: int,
+    spindles: list[dict],
+    as_int: bool = False,
+) -> np.ndarray:
+    """Constructs a 1D boolean (or 0/1 integer) array where 1 (True) indicates a spindle
+
+    and 0 (False) indicates non-spindle background.
+
+    Parameters
+    ----------
+    n_samples : int
+        Total length of the recording (e.g. len(signal)).
+    spindles : list[dict]
+        List of spindle dictionaries containing 'start' and 'end' sample indices.
+    as_int : bool, optional
+        If True, returns an int8 array (0 and 1). Default is False (boolean True/False).
+
+    Returns
+    -------
+    np.ndarray
+        1D binary mask of shape (n_samples,).
+    """
+    mask = np.zeros(n_samples, dtype=np.int8 if as_int else bool)
+    for sp in spindles:
+        mask[sp["start"] : sp["end"]] = 1 if as_int else True
+    return mask
