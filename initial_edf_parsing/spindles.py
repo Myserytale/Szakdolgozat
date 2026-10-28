@@ -42,16 +42,28 @@ def detect_custom_spindles(
     min_samples = int(duration[0] * fs)
     max_samples = int(duration[1] * fs)
 
+    # Zero-padded FFT size (4 s -> 0.25 Hz frequency resolution)
+    nfft = 4 * fs
+    fft_freqs = np.fft.rfftfreq(nfft, 1.0 / fs)
+    f_mask = (fft_freqs >= freq_range[0]) & (fft_freqs <= freq_range[1])
+
     spindles = []
     for s, e in zip(starts, ends):
         dur = (e - s) / fs
         if min_samples <= (e - s) <= max_samples:
-            spindles.append({
-                "start": s,
-                "end": e,
-                "dur": dur,
-                "peak_amp": float(np.max(np.abs(signal[s:e]))),
-            })
+            seg = sigma[s:e] * np.hanning(e - s)
+            psd = np.abs(np.fft.rfft(seg, n=nfft)) ** 2
+            peak_freq = float(fft_freqs[f_mask][np.argmax(psd[f_mask])])
+
+            spindles.append(
+                {
+                    "start": int(s),
+                    "end": int(e),
+                    "dur": float(dur),
+                    "peak_amp": float(np.max(np.abs(signal[s:e]))),
+                    "freq": peak_freq,
+                }
+            )
     return spindles
 
 
@@ -61,16 +73,17 @@ def detect_yasa_spindles(
     hypnogram: np.ndarray,
     artefacts: np.ndarray,
     art_idx: int,
-    stage_code=2,
+    stage_code: int | tuple[int, ...] = 2,
     freq_sp=(11, 16),
 ) -> list[dict]:
     """Detects sleep spindles using YASA (Lacourse et al., 2019) and filters for clean epochs."""
+    include = (stage_code,) if isinstance(stage_code, int) else tuple(stage_code)
     sp = yasa.spindles_detect(
         signal,
         fs,
         ch_names=["EEG"],
         hypno=hypnogram,
-        include=(stage_code,),
+        include=include,
         freq_sp=freq_sp,
     )
     df = sp.summary()
@@ -81,13 +94,15 @@ def detect_yasa_spindles(
             s_idx = int(row["Start"] * fs)
             e_idx = int((row["Start"] + row["Duration"]) * fs)
             if np.all(artefacts[s_idx:e_idx, art_idx] == 0):
-                spindles.append({
-                    "start": s_idx,
-                    "end": e_idx,
-                    "dur": float(row["Duration"]),
-                    "peak_amp": float(row["Amplitude"]),
-                    "freq": float(row["Frequency"]),
-                })
+                spindles.append(
+                    {
+                        "start": s_idx,
+                        "end": e_idx,
+                        "dur": float(row["Duration"]),
+                        "peak_amp": float(row["Amplitude"]),
+                        "freq": float(row["Frequency"]),
+                    }
+                )
     return spindles
 
 

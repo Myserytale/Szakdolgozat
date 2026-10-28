@@ -105,3 +105,44 @@ def load_hypart(file_path: Path | str) -> tuple[np.ndarray, np.ndarray, list[str
 
     artefacts = np.column_stack(art_list)
     return hypnogram, artefacts, art_channels
+
+
+def load_recording(edf_name: str, channel: str):
+    """Loads one EEG channel together with its hypnogram and artifact flags.
+
+    Parameters
+    ----------
+    edf_name : str
+        File name inside DATA_DIR, e.g. "BB0008_SP2.edf".
+    channel : str
+        EEG channel label, e.g. "C3" or "P3".
+
+    Returns
+    -------
+    signal : np.ndarray
+        The EEG signal of the channel.
+    fs : int
+        Sampling rate in Hz.
+    hypnogram : np.ndarray
+        Sleep stage per sample.
+    artefacts : np.ndarray
+        Artifact flag matrix (0 = clean).
+    art_idx : int
+        Column of `artefacts` belonging to this channel (e.g. "ArtiFFT C3-A2").
+    """
+    edf_path = DATA_DIR / edf_name
+    hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
+
+    edf_data = read_edf(edf_path, channels=[channel])
+    signal = edf_data["signals"][channel]
+    fs = int(edf_data["sample_rates"][0])
+
+    hypnogram, artefacts, art_channels = load_hypart(hypart_path)
+
+    # Left channels are referenced to A2, right channels to A1 (e.g. "ArtiFFT C4-A1")
+    matches = [i for i, name in enumerate(art_channels) if name.startswith(f"ArtiFFT {channel}-")]
+    if not matches:
+        raise ValueError(f"No artifact channel for '{channel}'. Available: {art_channels}")
+    art_idx = matches[0]
+
+    return signal, fs, hypnogram, artefacts, art_idx

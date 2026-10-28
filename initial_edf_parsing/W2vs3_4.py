@@ -2,18 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch
 
-from reading_working import *
+from reading_working import load_recording
 
-# 1. Load data and annotations
-edf_path = DATA_DIR / "BB0008_SP2.edf"
-hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
-
-edf_data = read_edf(edf_path)
-c3_signal = edf_data["signals"]["C3"]
-fs = int(edf_data["sample_rates"][edf_data["labels"].index("C3")])
-
-hypnogram, artefacts, art_channels = load_hypart(hypart_path)
-art_idx = art_channels.index("ArtiFFT C3-A2")
+# 1. Load data and annotations (only C3 is read, instead of all 31 channels)
+c3_signal, fs, hypnogram, artefacts, art_idx = load_recording("BB0008_SP2.edf", "C3")
 
 # 2. Settings
 epoch_sec = 10

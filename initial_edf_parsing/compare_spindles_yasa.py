@@ -1,25 +1,17 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from reading_working import DATA_DIR, HYPART_DIR, load_hypart, read_edf
+from reading_working import load_recording
 from spindles import detect_all_spindles
 
 # ==============================================================================
 # 1. Load Data & Annotations
 # ==============================================================================
+edf_name = "BB0008_SP2.edf"
 channel = "C3"
-art_channel = f"ArtiFFT {channel}-A2"
 
-edf_path = DATA_DIR / "BB0008_SP2.edf"
-hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
-
-print(f"Loading {edf_path.name} ({channel})...")
-edf_data = read_edf(edf_path, channels=[channel])
-signal = edf_data["signals"][channel]
-fs = int(edf_data["sample_rates"][0])
-
-hypnogram, artefacts, art_channels = load_hypart(hypart_path)
-art_idx = art_channels.index(art_channel)
+print(f"Loading {edf_name} ({channel})...")
+signal, fs, hypnogram, artefacts, art_idx = load_recording(edf_name, channel)
 
 # Clean Stage 2 (NREM2) mask
 is_n2 = (hypnogram == 2) & (artefacts[:, art_idx] == 0)
@@ -56,6 +48,7 @@ print(f"{'Detected Spindles':<25} | {len(custom_spindles):<13} | {len(yasa_spind
 print(f"{'Density (spindles/min)':<25} | {len(custom_spindles)/n2_minutes:<13.2f} | {len(yasa_spindles)/n2_minutes:<10.2f}")
 print(f"{'Mean Duration (s)':<25} | {np.mean([s['dur'] for s in custom_spindles]):<13.2f} | {np.mean([s['dur'] for s in yasa_spindles]):<10.2f}")
 print(f"{'Mean Peak Amplitude (µV)':<25} | {np.mean([s['peak_amp'] for s in custom_spindles]):<13.2f} | {np.mean([s['peak_amp'] for s in yasa_spindles]):<10.2f}")
+print(f"{'Mean Frequency (Hz)':<25} | {np.mean([s['freq'] for s in custom_spindles]):<13.2f} | {np.mean([s['freq'] for s in yasa_spindles]):<10.2f}")
 print("-" * 55)
 print(f"Agreement: {overlap_count} of {len(custom_spindles)} Custom spindles ({overlap_pct:.1f}%) match YASA.")
 print("=" * 55)

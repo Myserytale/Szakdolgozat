@@ -2,26 +2,18 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import numpy as np
 
-from reading_working import DATA_DIR, HYPART_DIR, load_hypart, read_edf
+from reading_working import load_recording
 from spindles import detect_all_spindles
 
 # ==============================================================================
 # 1. Settings & Load Data
 # ==============================================================================
+edf_name = "BB0008_SP2.edf"
 channel = "C3"
-art_channel = f"ArtiFFT {channel}-A2"
 epoch_sec = 30  # Standard clinical PSG epoch duration (30 seconds)
 
-edf_path = DATA_DIR / "BB0008_SP2.edf"
-hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
-
-print(f"Loading {edf_path.name} ({channel})...")
-edf_data = read_edf(edf_path, channels=[channel])
-signal = edf_data["signals"][channel]
-fs = int(edf_data["sample_rates"][0])
-
-hypnogram, artefacts, art_channels = load_hypart(hypart_path)
-art_idx = art_channels.index(art_channel)
+print(f"Loading {edf_name} ({channel})...")
+signal, fs, hypnogram, artefacts, art_idx = load_recording(edf_name, channel)
 
 # Detect spindles (Custom SciPy + YASA)
 print("Detecting sleep spindles (Custom + YASA)...")
@@ -126,7 +118,7 @@ def update_view():
                 active_highlights.append(span)
 
                 badge = ax.text(
-                    (s_t + e_t) / 2, max_amp * 0.82, f"Custom\n{sp['dur']:.2f}s",
+                    (s_t + e_t) / 2, max_amp * 0.82, f"Custom\n{sp['dur']:.2f}s | {sp['freq']:.1f}Hz",
                     ha="center", va="center", fontsize=8, fontweight="bold", color="#b35900",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="orange", alpha=0.9),
                 )
@@ -148,7 +140,7 @@ def update_view():
                 active_highlights.append(span)
 
                 badge = ax.text(
-                    (s_t + e_t) / 2, max_amp * 0.60, f"YASA\n{sp['dur']:.2f}s",
+                    (s_t + e_t) / 2, max_amp * 0.60, f"YASA\n{sp['dur']:.2f}s | {sp['freq']:.1f}Hz",
                     ha="center", va="center", fontsize=8, fontweight="bold", color="#005580",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="#007acc", alpha=0.9),
                 )
