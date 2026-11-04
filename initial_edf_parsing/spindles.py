@@ -19,8 +19,16 @@ def detect_custom_spindles(
     freq_range=(11, 16),
     std_thresh=1.5,
     duration=(0.5, 2.5),
+    detect_mask: np.ndarray | None = None,
 ) -> list[dict]:
-    """Detects sleep spindles using 11-16 Hz bandpass filtering and Hilbert envelope thresholding."""
+    """Detects sleep spindles using 11-16 Hz bandpass filtering and Hilbert envelope thresholding.
+
+    `is_n2` defines the baseline used for the threshold. `detect_mask` (optional) defines
+    where spindles may be detected; it defaults to `is_n2`.
+    """
+    if detect_mask is None:
+        detect_mask = is_n2
+
     # 4th-order zero-phase bandpass filter
     sos = butter(4, freq_range, btype="bandpass", fs=fs, output="sos")
     sigma = sosfiltfilt(sos, signal)
@@ -29,7 +37,7 @@ def detect_custom_spindles(
     # Threshold based on clean N2 baseline
     thresh = np.mean(envelope[is_n2]) + std_thresh * np.std(envelope[is_n2])
 
-    above = (envelope > thresh) & is_n2
+    above = (envelope > thresh) & detect_mask
     diff = np.diff(above.astype(np.int8))
     starts = np.where(diff == 1)[0] + 1
     ends = np.where(diff == -1)[0] + 1

@@ -7,6 +7,8 @@
 # Whitelist the initial folder and its contents
 !initial_edf_parsing/
 
-# Ignore Python caches within the initial folder
+# Ignore Python caches and generated CSV outputs within the initial folder
 initial_edf_parsing/**/__pycache__/
 initial_edf_parsing/**/*.py[cod]
+initial_edf_parsing/spindles_csv/
+initial_edf_parsing/*.csv
