@@ -16,7 +16,9 @@ import numpy as np
 from scipy.signal import welch
 
 
-def make_binary_signal(spindles: list[dict], n_samples: int, fs: int, fs_down: int = 4) -> np.ndarray:
+def make_binary_signal(
+    spindles: list[dict], n_samples: int, fs: int, fs_down: int = 4
+) -> np.ndarray:
     """Builds the 1/0 spindle signal at the downsampled rate `fs_down`."""
     factor = fs // fs_down
     binary = np.zeros(n_samples // factor, dtype=np.float32)
@@ -92,7 +94,14 @@ def compute_eip(
     noverlap = int(nperseg * 0.75)
 
     def psd(x):
-        return welch(x, fs=fs_down, window="hann", nperseg=nperseg, noverlap=noverlap)
+        return welch(
+            x,
+            fs=fs_down,
+            window="hann",
+            nperseg=nperseg,
+            noverlap=noverlap,
+            detrend=False,
+        )
 
     orig_psds, perm_psds, segments = [], [], []
     for s, e in contiguous_segments(mask_down, nperseg):
@@ -100,13 +109,17 @@ def compute_eip(
         if seg.sum() == 0:  # no spindles -> nothing to analyse
             continue
         f, p_orig = psd(seg)
-        p_perm = np.mean([psd(shuffle_train(seg, rng))[1] for _ in range(n_shuffles)], axis=0)
+        p_perm = np.mean(
+            [psd(shuffle_train(seg, rng))[1] for _ in range(n_shuffles)], axis=0
+        )
         orig_psds.append(p_orig)
         perm_psds.append(p_perm)
         segments.append(seg)
 
     if not segments:
-        raise ValueError(f"No clean segment of at least {window_sec} s contains spindles.")
+        raise ValueError(
+            f"No clean segment of at least {window_sec} s contains spindles."
+        )
 
     psd_orig = np.mean(orig_psds, axis=0)
     psd_perm = np.mean(perm_psds, axis=0)

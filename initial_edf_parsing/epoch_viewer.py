@@ -4,7 +4,7 @@ import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
 
 from reading_working import load_recording
-from spindles import detect_all_spindles
+from spindles import detect_all_spindles, detect_custom_spindles_bridged
 
 # ==============================================================================
 # 1. Settings & Load Data
@@ -17,18 +17,24 @@ print(f"Loading {edf_name} ({channel})...")
 signal, fs, hypnogram, artefacts, art_idx = load_recording(edf_name, channel)
 art_mask = artefacts[:, art_idx] != 0
 
-# Precompute 11-16 Hz sigma band + Hilbert envelope + threshold
+# Precompute 11-16 Hz sigma band + Hilbert envelope + thresholds
 is_n2 = (hypnogram == 2) & (~art_mask)
 sos = butter(4, (11, 16), btype="bandpass", fs=fs, output="sos")
 sigma = sosfiltfilt(sos, signal)
 envelope = np.abs(hilbert(sigma))
-sigma_thresh = float(np.mean(envelope[is_n2]) + 1.5 * np.std(envelope[is_n2]))
+env_mean = float(np.mean(envelope[is_n2]))
+env_std = float(np.std(envelope[is_n2]))
+sigma_thresh = env_mean + 1.5 * env_std
+sigma_high_thresh = env_mean + 2.0 * env_std
 
-print("Detecting sleep spindles (Custom + YASA)...")
+print("Detecting sleep spindles (Custom + Bridged + YASA)...")
 custom_spindles, yasa_spindles = detect_all_spindles(
     signal, fs, hypnogram, artefacts, art_idx
 )
-print(f"Detected: Custom={len(custom_spindles)} | YASA={len(yasa_spindles)} spindles.")
+bridged_spindles = detect_custom_spindles_bridged(signal, fs, is_n2)
+print(
+    f"Detected: Custom={len(custom_spindles)} | Bridged={len(bridged_spindles)} | YASA={len(yasa_spindles)} spindles."
+)
 
 # ==============================================================================
 # 2. Epoch & Stage Setup
@@ -51,6 +57,7 @@ stage_colors = {
 current_epoch = 0
 y_lim = 100.0  # Fixed amplitude scale (µV), adjustable with Up/Down keys
 show_custom = True
+show_bridged = True
 show_yasa = True
 
 # ==============================================================================
@@ -85,7 +92,7 @@ ax_eeg.set_xlim(0, epoch_sec)
 ax_eeg.set_ylabel("EEG (µV)")
 ax_eeg.grid(True, linestyle="--", alpha=0.35)
 
-# Bottom: Sigma (11-16 Hz) + Envelope + Threshold
+# Bottom: Sigma (11-16 Hz) + Envelope + Thresholds
 (sig_line,) = ax_sig.plot(
     t, sigma[:epoch_len], color="#555555", linewidth=0.7, label="Sigma (11–16 Hz)"
 )
@@ -97,16 +104,23 @@ ax_sig.axhline(
     color="#d62728",
     linestyle="--",
     linewidth=1.0,
-    label=f"Threshold ({sigma_thresh:.1f} µV)",
+    label=f"Base 1.5 SD ({sigma_thresh:.1f} µV)",
+)
+ax_sig.axhline(
+    sigma_high_thresh,
+    color="#2ca02c",
+    linestyle=":",
+    linewidth=1.1,
+    label=f"Peak 2.0 SD ({sigma_high_thresh:.1f} µV)",
 )
 ax_sig.set_xlim(0, epoch_sec)
 ax_sig.set_ylim(-35, 35)
 ax_sig.set_xlabel(
-    "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W next/prev spindle | ↑/↓ zoom µV | 1/2 toggle]"
+    "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W next/prev spindle | ↑/↓ zoom µV | 1/2/3 toggle]"
 )
 ax_sig.set_ylabel("Sigma (µV)")
 ax_sig.grid(True, linestyle="--", alpha=0.35)
-ax_sig.legend(loc="upper right", fontsize=8, ncol=3)
+ax_sig.legend(loc="upper right", fontsize=8, ncol=4)
 
 highlights = []
 
@@ -180,14 +194,21 @@ def update_view():
 
     c_cnt = (
         draw_spindles(
-            custom_spindles, start, end, "orange", "orange", y_lim * 0.78, "Custom"
+            custom_spindles, start, end, "orange", "orange", y_lim * 0.82, "Custom"
         )
         if show_custom
         else 0
     )
+    b_cnt = (
+        draw_spindles(
+            bridged_spindles, start, end, "#c8f7c5", "#2ca02c", y_lim * 0.56, "Bridged"
+        )
+        if show_bridged
+        else 0
+    )
     y_cnt = (
         draw_spindles(
-            yasa_spindles, start, end, "#d0edff", "#007acc", y_lim * 0.52, "YASA"
+            yasa_spindles, start, end, "#d0edff", "#007acc", y_lim * 0.30, "YASA"
         )
         if show_yasa
         else 0
@@ -196,7 +217,7 @@ def update_view():
     art_status = "ARTIFACT" if np.any(art_ep) else "CLEAN"
     ax_eeg.set_title(
         f"Epoch {current_epoch + 1}/{n_epochs} | {time_str} | {stage_names.get(stage, stage)} "
-        f"| [{art_status}] | Custom: {c_cnt}  YASA: {y_cnt} | Scale: ±{int(y_lim)} µV",
+        f"| [{art_status}] | Custom: {c_cnt}  Bridged: {b_cnt}  YASA: {y_cnt} | Scale: ±{int(y_lim)} µV",
         fontsize=11,
         fontweight="bold",
     )
@@ -218,11 +239,13 @@ def step_epoch(delta):
 
 def jump_spindle(direction=1):
     global current_epoch
-    active = (custom_spindles if show_custom else []) + (
-        yasa_spindles if show_yasa else []
+    active = (
+        (custom_spindles if show_custom else [])
+        + (bridged_spindles if show_bridged else [])
+        + (yasa_spindles if show_yasa else [])
     )
     if not active:
-        active = custom_spindles + yasa_spindles
+        active = custom_spindles + bridged_spindles + yasa_spindles
     epochs = (
         range(current_epoch + 1, n_epochs)
         if direction > 0
@@ -240,6 +263,13 @@ def toggle_custom(event=None):
     global show_custom
     show_custom = not show_custom
     btn_custom.label.set_text(f"Custom: {'ON' if show_custom else 'OFF'}")
+    update_view()
+
+
+def toggle_bridged(event=None):
+    global show_bridged
+    show_bridged = not show_bridged
+    btn_bridged.label.set_text(f"Bridged: {'ON' if show_bridged else 'OFF'}")
     update_view()
 
 
@@ -276,6 +306,8 @@ def on_key(event):
     elif event.key == "1":
         toggle_custom()
     elif event.key == "2":
+        toggle_bridged()
+    elif event.key == "3":
         toggle_yasa()
 
 
@@ -285,22 +317,26 @@ fig.canvas.mpl_connect("key_press_event", on_key)
 # ==============================================================================
 # 5. Buttons (Single Clean Row)
 # ==============================================================================
-btn_prev = Button(plt.axes([0.06, 0.04, 0.12, 0.055]), "◀ Prev")
-btn_next = Button(plt.axes([0.19, 0.04, 0.12, 0.055]), "Next ▶")
+btn_prev = Button(plt.axes([0.04, 0.04, 0.10, 0.055]), "◀ Prev")
+btn_next = Button(plt.axes([0.15, 0.04, 0.10, 0.055]), "Next ▶")
 btn_pspn = Button(
-    plt.axes([0.33, 0.04, 0.15, 0.055]), "◀ Prev Spindle", color="#ffebcc"
+    plt.axes([0.27, 0.04, 0.13, 0.055]), "◀ Prev Spindle", color="#ffebcc"
 )
 btn_nspn = Button(
-    plt.axes([0.49, 0.04, 0.15, 0.055]), "Next Spindle ▶", color="#ffebcc"
+    plt.axes([0.41, 0.04, 0.13, 0.055]), "Next Spindle ▶", color="#ffebcc"
 )
-btn_custom = Button(plt.axes([0.66, 0.04, 0.13, 0.055]), "Custom: ON", color="#ffe0b2")
-btn_yasa = Button(plt.axes([0.80, 0.04, 0.13, 0.055]), "YASA: ON", color="#d0edff")
+btn_custom = Button(plt.axes([0.56, 0.04, 0.12, 0.055]), "Custom: ON", color="#ffe0b2")
+btn_bridged = Button(
+    plt.axes([0.69, 0.04, 0.12, 0.055]), "Bridged: ON", color="#c8f7c5"
+)
+btn_yasa = Button(plt.axes([0.82, 0.04, 0.12, 0.055]), "YASA: ON", color="#d0edff")
 
 btn_prev.on_clicked(lambda _: step_epoch(-1))
 btn_next.on_clicked(lambda _: step_epoch(1))
 btn_pspn.on_clicked(lambda _: jump_spindle(-1))
 btn_nspn.on_clicked(lambda _: jump_spindle(1))
 btn_custom.on_clicked(toggle_custom)
+btn_bridged.on_clicked(toggle_bridged)
 btn_yasa.on_clicked(toggle_yasa)
 
 if __name__ == "__main__":

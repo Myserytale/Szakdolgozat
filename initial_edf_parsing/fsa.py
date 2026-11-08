@@ -18,7 +18,10 @@ single_edf = "BB0008_SP3.edf"
 channel = "P3"
 fast_range = (8.0, 15.0)
 freq_sp = (min(11.0, fast_range[0]), max(16.0, fast_range[1]))
-plot_fmin, plot_fmax = 0.0039, 2.0  # Wider frequency range (up to 2 Hz Nyquist at 4 Hz sampling)
+plot_fmin, plot_fmax = (
+    0.0039,
+    2.0,
+)  # Wider frequency range (up to 2 Hz Nyquist at 4 Hz sampling)
 
 # 2. Compute EIP for every EDF file in the dataset
 results = {}

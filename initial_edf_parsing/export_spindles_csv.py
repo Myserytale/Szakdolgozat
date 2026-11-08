@@ -8,11 +8,15 @@ import csv
 from pathlib import Path
 
 from reading_working import edf_files, load_recording
-from spindles import detect_custom_spindles, detect_yasa_spindles
+from spindles import (
+    detect_custom_spindles,
+    detect_custom_spindles_bridged,
+    detect_yasa_spindles,
+)
 
 # 1. Settings
 channel = "C3"
-detector = "yasa"  # "yasa" or "custom"
+detector = "yasa"  # "yasa", "custom", or "custom_bridged"
 stages = (2, 3, 4)  # NREM sleep stages (2=N2, 3=N3, 4=N4)
 out_dir = Path(__file__).resolve().parent / "spindles_csv"
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -40,11 +44,19 @@ for edf_path in edf_files:
             signal, fs, hypnogram, artefacts, art_idx, stage_code=stages
         )
     else:
+        is_clean_n2 = (hypnogram == 2) & (artefacts[:, art_idx] == 0)
         is_clean_stage = (
             sum(hypnogram == s for s in stages).astype(bool)
             & (artefacts[:, art_idx] == 0)
         )
-        spindles = detect_custom_spindles(signal, fs, is_clean_stage)
+        if detector == "custom_bridged":
+            spindles = detect_custom_spindles_bridged(
+                signal, fs, is_clean_n2, detect_mask=is_clean_stage
+            )
+        else:
+            spindles = detect_custom_spindles(
+                signal, fs, is_clean_n2, detect_mask=is_clean_stage
+            )
 
     # 4. Write CSV
     with open(out_csv, "w", newline="") as f:

@@ -279,7 +279,7 @@ def generate_webapp_files() -> Path:
         with open(REPORT_PATH, "r") as f:
             report_data = json.load(f)
     else:
-        report_data = run_full_modular_comparison("BB0008_SP2.edf", "C3")
+        report_data = run_full_modular_comparison("BB0008_SP2.edf", "P3")
         with open(REPORT_PATH, "w") as f:
             json.dump(report_data, f, indent=2)
 
@@ -297,7 +297,7 @@ class SpindleAppHandler(SimpleHTTPRequestHandler):
         elif parsed.path == "/api/compare":
             qs = parse_qs(parsed.query)
             edf = qs.get("edf", ["BB0008_SP2.edf"])[0]
-            ch = qs.get("ch", ["C3"])[0]
+            ch = qs.get("ch", ["P3"])[0]
             iou = float(qs.get("iou", ["0.2"])[0])
             std = float(qs.get("std", ["1.5"])[0])
             data = run_full_modular_comparison(edf, ch, iou_thresh=iou, std_thresh=std)

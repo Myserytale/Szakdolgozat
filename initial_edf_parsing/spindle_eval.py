@@ -346,9 +346,44 @@ def compute_stage_comparison(
     custom_thresh_uv = float(np.mean(env[is_n2]) + std_thresh * np.std(env[is_n2]))
     del env
 
-    hyp_clean = hypnogram.astype(int).copy()
-    hyp_clean[~clean] = -1
-    yasa_sp = detect_yasa_spindles(signal, fs, hyp_clean, artefacts, art_idx, stage_code=all_codes)
+    # Calibrate YASA's RMS threshold to the N2 baseline (same as Custom) so N2 counts match
+    import mne
+    from yasa.others import moving_transform, trimbothstd
+
+    sig_sigma = mne.filter.filter_data(
+        signal.astype(np.float64), fs, 11, 16, l_trans_bandwidth=1.5, h_trans_bandwidth=1.5, method="fir", verbose=0
+    )
+    _, mrms = moving_transform(x=sig_sigma, sf=fs, window=0.3, step=0.1, method="rms", interp=True)
+    t_n2 = mrms[hypnogram == 2].mean() + 1.5 * trimbothstd(mrms[hypnogram == 2], cut=0.10)
+    mask_all = np.isin(hypnogram, all_codes)
+    rms_param = float((t_n2 - mrms[mask_all].mean()) / trimbothstd(mrms[mask_all], cut=0.10))
+    del sig_sigma, mrms
+
+    sp_obj = yasa.spindles_detect(
+        signal,
+        fs,
+        ch_names=["EEG"],
+        hypno=hypnogram,
+        include=all_codes,
+        freq_sp=(11, 16),
+        thresh={"rel_pow": 0.2, "corr": 0.65, "rms": rms_param},
+    )
+    df = sp_obj.summary()
+    yasa_sp = []
+    if df is not None and len(df) > 0:
+        for _, row in df.iterrows():
+            s_idx = int(row["Start"] * fs)
+            e_idx = int((row["Start"] + row["Duration"]) * fs)
+            if np.all(artefacts[s_idx:e_idx, art_idx] == 0):
+                yasa_sp.append(
+                    {
+                        "start": s_idx,
+                        "end": e_idx,
+                        "dur": float(row["Duration"]),
+                        "peak_amp": float(row["Amplitude"]),
+                        "freq": float(row["Frequency"]),
+                    }
+                )
 
     ev = match_spindle_events(custom, yasa_sp, iou_thresh=iou_thresh)
     matched_c = {m["custom_idx"] for m in ev["matches"]}
