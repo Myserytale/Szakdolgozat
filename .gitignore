@@ -1,14 +1,24 @@
 # Ignore everything by default
 /*
 
-# Whitelist .gitignore
+# Whitelist repository files & folders
 !.gitignore
-
-# Whitelist the initial folder and its contents
+!README.md
+!requirements.txt
 !initial_edf_parsing/
+!literature/
+!pyeeg/
 
-# Ignore Python caches and generated CSV outputs within the initial folder
-initial_edf_parsing/**/__pycache__/
-initial_edf_parsing/**/*.py[cod]
+# Ignore Python caches everywhere
+**/__pycache__/
+**/*.py[cod]
+.venv/
+
+# Ignore raw backups and archives
+archives/
+*.zip
+
+# Ignore large generated data outputs by default (keep source code clean)
+outputs/spindles_csv/
 initial_edf_parsing/spindles_csv/
 initial_edf_parsing/*.csv

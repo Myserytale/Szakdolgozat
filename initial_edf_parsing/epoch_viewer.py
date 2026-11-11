@@ -59,6 +59,18 @@ y_lim = 100.0  # Fixed amplitude scale (µV), adjustable with Up/Down keys
 show_custom = True
 show_bridged = True
 show_yasa = True
+show_artifacts = True
+
+# Epoch-level artifact detection & intervals
+ep_art_reshaped = art_mask[: n_epochs * epoch_len].reshape(n_epochs, epoch_len)
+art_epochs = np.any(ep_art_reshaped, axis=1)
+n_art_epochs = int(np.sum(art_epochs))
+art_pct = (n_art_epochs / n_epochs * 100) if n_epochs > 0 else 0.0
+
+diff = np.diff(np.concatenate(([0], art_epochs.astype(np.int8), [0])))
+starts = np.where(diff == 1)[0]
+ends = np.where(diff == -1)[0]
+art_intervals = [(int(s), int(e - s)) for s, e in zip(starts, ends)]
 
 # ==============================================================================
 # 3. Figure Layout: Hypnogram (top), Raw EEG (middle), Sigma 11-16 Hz (bottom)
@@ -71,20 +83,51 @@ plt.subplots_adjust(bottom=0.20, hspace=0.32)
 # Top: Full-night hypnogram (click anywhere to jump to that epoch)
 hyp_epochs = hypnogram[: n_epochs * epoch_len : epoch_len].astype(float)
 hyp_epochs[hyp_epochs == 9] = np.nan
-ax_hyp.step(
-    np.arange(n_epochs), hyp_epochs, where="post", color="#333333", linewidth=1.0
+
+# 1. Soft vertical column shading for artifacted epochs across stages
+art_span_col = ax_hyp.broken_barh(
+    art_intervals,
+    (-1.5, 7.0),
+    facecolors="#ff4d4d",
+    edgecolors="none",
+    alpha=0.16,
+    zorder=0,
 )
-ax_hyp.set_yticks([0, 1, 2, 3, 4, 5])
-ax_hyp.set_yticklabels(["W", "N1", "N2", "N3", "N4", "REM"], fontsize=8)
+# 2. Solid red artifact indicator bar at the 'Art' track level
+art_bar_col = ax_hyp.broken_barh(
+    art_intervals,
+    (-1.35, 0.7),
+    facecolors="#d62728",
+    edgecolors="none",
+    alpha=0.85,
+    zorder=1,
+    label=f"Artifact ({n_art_epochs}/{n_epochs} ep, {art_pct:.1f}%)",
+)
+# 3. Main hypnogram step line
+hyp_line = ax_hyp.step(
+    np.arange(n_epochs),
+    hyp_epochs,
+    where="post",
+    color="#222222",
+    linewidth=1.0,
+    zorder=2,
+    label="Sleep Stage",
+)
+ax_hyp.set_yticks([-1, 0, 1, 2, 3, 4, 5])
+ax_hyp.set_yticklabels(
+    ["Art", "W", "N1", "N2", "N3", "N4", "REM"], fontsize=8
+)
+ax_hyp.set_ylim(-1.5, 5.5)
 ax_hyp.invert_yaxis()
 ax_hyp.set_xlim(0, n_epochs)
 ax_hyp.set_title(
-    "Full-Night Hypnogram (click anywhere to jump to epoch)",
+    "Full-Night Hypnogram with Artifacts (click anywhere to jump to epoch)",
     fontsize=9.5,
     fontweight="bold",
 )
 ax_hyp.grid(True, linestyle="--", alpha=0.3)
-hyp_cursor = ax_hyp.axvline(0, color="red", linewidth=1.8)
+ax_hyp.legend(loc="upper right", fontsize=8, framealpha=0.9)
+hyp_cursor = ax_hyp.axvline(0, color="#0066cc", linewidth=2.0, zorder=5)
 
 # Middle: Raw EEG trace
 (eeg_line,) = ax_eeg.plot(t, signal[:epoch_len], linewidth=0.8, label=f"{channel} EEG")
@@ -116,7 +159,7 @@ ax_sig.axhline(
 ax_sig.set_xlim(0, epoch_sec)
 ax_sig.set_ylim(-35, 35)
 ax_sig.set_xlabel(
-    "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W next/prev spindle | ↑/↓ zoom µV | 1/2/3 toggle]"
+    "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W spindle | E/Q artifact | ↑/↓ zoom µV | 1/2/3/4 toggle]"
 )
 ax_sig.set_ylabel("Sigma (µV)")
 ax_sig.grid(True, linestyle="--", alpha=0.35)
@@ -183,7 +226,7 @@ def update_view():
 
     # Shade exact artifact intervals within the epoch in red
     art_ep = art_mask[start:end]
-    if np.any(art_ep):
+    if show_artifacts and np.any(art_ep):
         diff = np.diff(np.concatenate(([0], art_ep.astype(np.int8), [0])))
         for a_s, a_e in zip(np.where(diff == 1)[0], np.where(diff == -1)[0]):
             highlights.append(
@@ -214,7 +257,12 @@ def update_view():
         else 0
     )
 
-    art_status = "ARTIFACT" if np.any(art_ep) else "CLEAN"
+    if np.any(art_ep):
+        art_dur = float(np.sum(art_ep) / fs)
+        art_status = f"ARTIFACT ({art_dur:.1f}s)"
+    else:
+        art_status = "CLEAN"
+
     ax_eeg.set_title(
         f"Epoch {current_epoch + 1}/{n_epochs} | {time_str} | {stage_names.get(stage, stage)} "
         f"| [{art_status}] | Custom: {c_cnt}  Bridged: {b_cnt}  YASA: {y_cnt} | Scale: ±{int(y_lim)} µV",
@@ -259,6 +307,20 @@ def jump_spindle(direction=1):
             return
 
 
+def jump_artifact(direction=1):
+    global current_epoch
+    epochs = (
+        range(current_epoch + 1, n_epochs)
+        if direction > 0
+        else range(current_epoch - 1, -1, -1)
+    )
+    for ep in epochs:
+        if art_epochs[ep]:
+            current_epoch = ep
+            update_view()
+            return
+
+
 def toggle_custom(event=None):
     global show_custom
     show_custom = not show_custom
@@ -280,6 +342,16 @@ def toggle_yasa(event=None):
     update_view()
 
 
+def toggle_artifacts(event=None):
+    global show_artifacts
+    show_artifacts = not show_artifacts
+    art_span_col.set_visible(show_artifacts)
+    art_bar_col.set_visible(show_artifacts)
+    btn_art.label.set_text(f"Artifacts: {'ON' if show_artifacts else 'OFF'}")
+    btn_art.color = "#ffcccc" if show_artifacts else "#e0e0e0"
+    update_view()
+
+
 def on_click(event):
     global current_epoch
     if event.inaxes is ax_hyp and event.xdata is not None:
@@ -297,6 +369,10 @@ def on_key(event):
         jump_spindle(1)
     elif event.key in ("w", "W"):
         jump_spindle(-1)
+    elif event.key in ("e", "E"):
+        jump_artifact(1)
+    elif event.key in ("q", "Q"):
+        jump_artifact(-1)
     elif event.key == "up":
         y_lim = max(25.0, y_lim - 25.0)
         update_view()
@@ -309,6 +385,8 @@ def on_key(event):
         toggle_bridged()
     elif event.key == "3":
         toggle_yasa()
+    elif event.key == "4":
+        toggle_artifacts()
 
 
 fig.canvas.mpl_connect("button_press_event", on_click)
@@ -317,19 +395,26 @@ fig.canvas.mpl_connect("key_press_event", on_key)
 # ==============================================================================
 # 5. Buttons (Single Clean Row)
 # ==============================================================================
-btn_prev = Button(plt.axes([0.04, 0.04, 0.10, 0.055]), "◀ Prev")
-btn_next = Button(plt.axes([0.15, 0.04, 0.10, 0.055]), "Next ▶")
+btn_prev = Button(plt.axes([0.03, 0.04, 0.08, 0.055]), "◀ Prev")
+btn_next = Button(plt.axes([0.12, 0.04, 0.08, 0.055]), "Next ▶")
 btn_pspn = Button(
-    plt.axes([0.27, 0.04, 0.13, 0.055]), "◀ Prev Spindle", color="#ffebcc"
+    plt.axes([0.21, 0.04, 0.12, 0.055]), "◀ Prev Spn", color="#ffebcc"
 )
 btn_nspn = Button(
-    plt.axes([0.41, 0.04, 0.13, 0.055]), "Next Spindle ▶", color="#ffebcc"
+    plt.axes([0.34, 0.04, 0.12, 0.055]), "Next Spn ▶", color="#ffebcc"
 )
-btn_custom = Button(plt.axes([0.56, 0.04, 0.12, 0.055]), "Custom: ON", color="#ffe0b2")
+btn_custom = Button(
+    plt.axes([0.48, 0.04, 0.11, 0.055]), "Custom: ON", color="#ffe0b2"
+)
 btn_bridged = Button(
-    plt.axes([0.69, 0.04, 0.12, 0.055]), "Bridged: ON", color="#c8f7c5"
+    plt.axes([0.60, 0.04, 0.11, 0.055]), "Bridged: ON", color="#c8f7c5"
 )
-btn_yasa = Button(plt.axes([0.82, 0.04, 0.12, 0.055]), "YASA: ON", color="#d0edff")
+btn_yasa = Button(
+    plt.axes([0.72, 0.04, 0.11, 0.055]), "YASA: ON", color="#d0edff"
+)
+btn_art = Button(
+    plt.axes([0.84, 0.04, 0.13, 0.055]), "Artifacts: ON", color="#ffcccc"
+)
 
 btn_prev.on_clicked(lambda _: step_epoch(-1))
 btn_next.on_clicked(lambda _: step_epoch(1))
@@ -338,6 +423,7 @@ btn_nspn.on_clicked(lambda _: jump_spindle(1))
 btn_custom.on_clicked(toggle_custom)
 btn_bridged.on_clicked(toggle_bridged)
 btn_yasa.on_clicked(toggle_yasa)
+btn_art.on_clicked(toggle_artifacts)
 
 if __name__ == "__main__":
     update_view()

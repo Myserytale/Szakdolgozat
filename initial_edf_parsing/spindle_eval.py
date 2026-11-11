@@ -17,7 +17,12 @@ from scipy.signal import butter, hilbert, sosfiltfilt
 from scipy.stats import pearsonr
 import yasa
 
-from spindles import create_spindle_mask, detect_custom_spindles, detect_yasa_spindles
+from spindles import (
+    create_spindle_mask,
+    detect_custom_spindles,
+    detect_custom_spindles_bridged,
+    detect_yasa_spindles,
+)
 
 
 # ==============================================================================
@@ -242,11 +247,15 @@ def run_parameter_sweeps(
     is_n2: np.ndarray,
     yasa_spindles: list[dict],
     custom_default_spindles: list[dict],
+    bridged_default_spindles: list[dict] | None = None,
     freq_range=(11, 16),
     duration=(0.5, 2.5),
+    max_dip_sec=0.2,
+    min_part_sec=0.05,
+    peak_offset_std=0.5,
 ) -> dict:
     """Runs fast sweeps over:
-    1. Custom detector `std_thresh` (from 0.75 to 3.0 SD) -> Precision-Recall & F1 curve.
+    1. Detector `std_thresh` (from 0.75 to 3.0 SD) -> Precision-Recall & F1 curve for Custom & Bridged.
     2. Event matching `iou_thresh` (from 0.05 to 0.85) -> F1 stability curve.
     """
     # Precompute sigma & envelope once for fast threshold sweeping
@@ -258,12 +267,15 @@ def run_parameter_sweeps(
 
     min_samples = int(duration[0] * fs)
     max_samples = int(duration[1] * fs)
+    min_part_samples = int(min_part_sec * fs)
+    max_dip_samples = int(max_dip_sec * fs)
 
     std_grid = np.round(np.arange(0.75, 3.05, 0.25), 2)
     threshold_sweep = []
 
     for std_val in std_grid:
         thresh = env_mean + std_val * env_std
+        high_thresh = env_mean + (std_val + peak_offset_std) * env_std
         above = (envelope > thresh) & is_n2
         diff = np.diff(above.astype(np.int8))
         starts = np.where(diff == 1)[0] + 1
@@ -279,15 +291,42 @@ def run_parameter_sweeps(
             if min_samples <= (e - s) <= max_samples
         ]
         ev = match_spindle_events(sp_list, yasa_spindles, iou_thresh=0.2)
+
+        # Bridged segments at this std_val
+        raw_segs = [(int(s), int(e)) for s, e in zip(starts, ends) if (e - s) >= min_part_samples]
+        merged_segs: list[tuple[int, int]] = []
+        for s, e in raw_segs:
+            if merged_segs:
+                prev_s, prev_e = merged_segs[-1]
+                if (s - prev_e) <= max_dip_samples and np.all(is_n2[prev_e:s]):
+                    comb_peak = max(float(np.max(envelope[prev_s:prev_e])), float(np.max(envelope[s:e])))
+                    if comb_peak >= high_thresh:
+                        merged_segs[-1] = (prev_s, e)
+                        continue
+            merged_segs.append((s, e))
+
+        b_list = [
+            {"start": int(s), "end": int(e), "dur": float((e - s) / fs)}
+            for s, e in merged_segs
+            if min_samples <= (e - s) <= max_samples
+        ]
+        ev_b = match_spindle_events(b_list, yasa_spindles, iou_thresh=0.2)
+
         threshold_sweep.append(
             {
                 "std_thresh": float(std_val),
                 "uV_thresh": round(thresh, 2),
+                "uV_high_thresh": round(high_thresh, 2),
                 "count": len(sp_list),
                 "precision": ev["precision"],
                 "recall": ev["recall"],
                 "f1": ev["f1"],
                 "mean_iou": ev["mean_iou"],
+                "bridged_count": len(b_list),
+                "bridged_precision": ev_b["precision"],
+                "bridged_recall": ev_b["recall"],
+                "bridged_f1": ev_b["f1"],
+                "bridged_mean_iou": ev_b["mean_iou"],
             }
         )
 
@@ -295,15 +334,24 @@ def run_parameter_sweeps(
     iou_sweep = []
     for iou_t in iou_grid:
         ev = match_spindle_events(custom_default_spindles, yasa_spindles, iou_thresh=float(iou_t))
-        iou_sweep.append(
-            {
-                "iou_thresh": float(iou_t),
-                "tp": ev["tp"],
-                "precision": ev["precision"],
-                "recall": ev["recall"],
-                "f1": ev["f1"],
-            }
-        )
+        row = {
+            "iou_thresh": float(iou_t),
+            "tp": ev["tp"],
+            "precision": ev["precision"],
+            "recall": ev["recall"],
+            "f1": ev["f1"],
+        }
+        if bridged_default_spindles is not None:
+            ev_b = match_spindle_events(bridged_default_spindles, yasa_spindles, iou_thresh=float(iou_t))
+            row.update(
+                {
+                    "bridged_tp": ev_b["tp"],
+                    "bridged_precision": ev_b["precision"],
+                    "bridged_recall": ev_b["recall"],
+                    "bridged_f1": ev_b["f1"],
+                }
+            )
+        iou_sweep.append(row)
 
     return {
         "threshold_sweep": threshold_sweep,
@@ -334,16 +382,22 @@ def compute_stage_comparison(
     std_thresh: float = 1.5,
     iou_thresh: float = 0.2,
 ) -> dict:
-    """Compares Custom and YASA spindle incidence across sleep stages (N1, N2, N3, N4, REM)."""
+    """Compares Custom, Bridged, and YASA spindle incidence across sleep stages (N1, N2, N3, N4, REM)."""
     clean = artefacts[:, art_idx] == 0
     is_n2 = clean & (hypnogram == 2)
     all_codes = tuple(c for _, codes in STAGE_GROUPS for c in codes)
     valid = clean & np.isin(hypnogram, all_codes)
 
     custom = detect_custom_spindles(signal, fs, is_n2, std_thresh=std_thresh, detect_mask=valid)
+    bridged = detect_custom_spindles_bridged(
+        signal, fs, is_n2, std_thresh=std_thresh, peak_std_thresh=std_thresh + 0.5, detect_mask=valid
+    )
     sos = butter(4, (11, 16), btype="bandpass", fs=fs, output="sos")
     env = np.abs(hilbert(sosfiltfilt(sos, signal)))
-    custom_thresh_uv = float(np.mean(env[is_n2]) + std_thresh * np.std(env[is_n2]))
+    env_mean = float(np.mean(env[is_n2]))
+    env_std = float(np.std(env[is_n2]))
+    custom_thresh_uv = env_mean + std_thresh * env_std
+    custom_high_thresh_uv = env_mean + (std_thresh + 0.5) * env_std
     del env
 
     # Calibrate YASA's RMS threshold to the N2 baseline (same as Custom) so N2 counts match
@@ -389,10 +443,15 @@ def compute_stage_comparison(
     matched_c = {m["custom_idx"] for m in ev["matches"]}
     matched_y = {m["yasa_idx"] for m in ev["matches"]}
 
+    ev_b = match_spindle_events(bridged, yasa_sp, iou_thresh=iou_thresh)
+    matched_b = {m["custom_idx"] for m in ev_b["matches"]}
+    matched_y_b = {m["yasa_idx"] for m in ev_b["matches"]}
+
     def _mid_stage(sp: dict) -> int:
         return int(hypnogram[(sp["start"] + sp["end"]) // 2])
 
     c_stage = np.array([_mid_stage(sp) for sp in custom], dtype=int)
+    b_stage = np.array([_mid_stage(sp) for sp in bridged], dtype=int)
     y_stage = np.array([_mid_stage(sp) for sp in yasa_sp], dtype=int)
 
     def _feat_mean(spindles: list[dict], idx: np.ndarray, key: str):
@@ -403,34 +462,47 @@ def compute_stage_comparison(
     for name, codes in STAGE_GROUPS:
         minutes = float(np.sum(clean & np.isin(hypnogram, codes)) / fs / 60.0)
         c_idx = np.where(np.isin(c_stage, codes))[0]
+        b_idx = np.where(np.isin(b_stage, codes))[0]
         y_idx = np.where(np.isin(y_stage, codes))[0]
-        n_c, n_y = len(c_idx), len(y_idx)
+        n_c, n_b, n_y = len(c_idx), len(b_idx), len(y_idx)
         c_matched = sum(1 for i in c_idx if i in matched_c)
         y_matched = sum(1 for j in y_idx if j in matched_y)
+        b_matched = sum(1 for i in b_idx if i in matched_b)
+        yb_matched = sum(1 for j in y_idx if j in matched_y_b)
         stages.append(
             {
                 "stage": name,
                 "clean_minutes": round(minutes, 1),
                 "n_custom": n_c,
+                "n_bridged": n_b,
                 "n_yasa": n_y,
                 "custom_density": round(n_c / minutes, 2) if minutes > 0 else 0.0,
+                "bridged_density": round(n_b / minutes, 2) if minutes > 0 else 0.0,
                 "yasa_density": round(n_y / minutes, 2) if minutes > 0 else 0.0,
                 "n_both": y_matched,
+                "n_both_bridged": yb_matched,
                 "precision": round(c_matched / n_c, 4) if n_c else None,
                 "recall": round(y_matched / n_y, 4) if n_y else None,
+                "bridged_precision": round(b_matched / n_b, 4) if n_b else None,
+                "bridged_recall": round(yb_matched / n_y, 4) if n_y else None,
                 "custom_freq": _feat_mean(custom, c_idx, "freq"),
+                "bridged_freq": _feat_mean(bridged, b_idx, "freq"),
                 "yasa_freq": _feat_mean(yasa_sp, y_idx, "freq"),
                 "custom_dur": _feat_mean(custom, c_idx, "dur"),
+                "bridged_dur": _feat_mean(bridged, b_idx, "dur"),
                 "yasa_dur": _feat_mean(yasa_sp, y_idx, "dur"),
                 "custom_amp": _feat_mean(custom, c_idx, "peak_amp"),
+                "bridged_amp": _feat_mean(bridged, b_idx, "peak_amp"),
                 "yasa_amp": _feat_mean(yasa_sp, y_idx, "peak_amp"),
             }
         )
 
     return {
-        "baseline": "clean N2 baseline for Custom; clean sleep (N1–N4, REM) for YASA",
+        "baseline": "clean N2 baseline for Custom/Bridged; clean sleep (N1–N4, REM) for YASA",
         "custom_thresh_uv": round(custom_thresh_uv, 2),
+        "custom_high_thresh_uv": round(custom_high_thresh_uv, 2),
         "n_custom": len(custom),
+        "n_bridged": len(bridged),
         "n_yasa": len(yasa_sp),
         "stages": stages,
     }
@@ -560,7 +632,7 @@ def run_full_modular_comparison(
     iou_thresh: float = 0.2,
     std_thresh: float = 1.5,
 ) -> dict:
-    """Runs the complete 5-module benchmark on a recording and returns a structured dictionary."""
+    """Runs the complete benchmark (Custom & Bridged vs. YASA) on a recording and returns a structured dict."""
     from reading_working import load_recording
 
     signal, fs, hypnogram, artefacts, art_idx = load_recording(edf_name, channel)
@@ -568,23 +640,35 @@ def run_full_modular_comparison(
     n2_minutes = float(np.sum(is_n2) / fs / 60.0)
 
     custom_spindles = detect_custom_spindles(signal, fs, is_n2, std_thresh=std_thresh)
+    bridged_spindles = detect_custom_spindles_bridged(
+        signal, fs, is_n2, std_thresh=std_thresh, peak_std_thresh=std_thresh + 0.5
+    )
     yasa_spindles = detect_yasa_spindles(signal, fs, hypnogram, artefacts, art_idx)
 
     sample_metrics = compute_sample_metrics(custom_spindles, yasa_spindles, is_n2, fs)
+    bridged_sample_metrics = compute_sample_metrics(bridged_spindles, yasa_spindles, is_n2, fs)
+
     event_metrics = match_spindle_events(custom_spindles, yasa_spindles, iou_thresh=iou_thresh)
+    bridged_event_metrics = match_spindle_events(bridged_spindles, yasa_spindles, iou_thresh=iou_thresh)
+
     boundary_metrics = compute_boundary_metrics(event_metrics["matches"], fs)
+    bridged_boundary_metrics = compute_boundary_metrics(bridged_event_metrics["matches"], fs)
+
     feature_metrics = compute_feature_agreement(event_metrics["matches"])
-    sweeps = run_parameter_sweeps(signal, fs, is_n2, yasa_spindles, custom_spindles)
+    bridged_feature_metrics = compute_feature_agreement(bridged_event_metrics["matches"])
+
+    sweeps = run_parameter_sweeps(
+        signal, fs, is_n2, yasa_spindles, custom_spindles, bridged_default_spindles=bridged_spindles
+    )
     examples = extract_example_windows(signal, fs, is_n2, event_metrics, std_thresh=std_thresh)
     stage_metrics = compute_stage_comparison(
         signal, fs, hypnogram, artefacts, art_idx, std_thresh=std_thresh, iou_thresh=iou_thresh
     )
 
-    # Remove raw match lists from summary JSON if needed, or keep compact
-    compact_event_metrics = {
-        k: v for k, v in event_metrics.items() if k not in ("matches", "unmatched_custom", "unmatched_yasa")
-    }
-    compact_event_metrics["ious"] = [m["iou"] for m in event_metrics["matches"]]
+    def _compact_ev(ev_dict: dict) -> dict:
+        out = {k: v for k, v in ev_dict.items() if k not in ("matches", "unmatched_custom", "unmatched_yasa")}
+        out["ious"] = [m["iou"] for m in ev_dict["matches"]]
+        return out
 
     return {
         "metadata": {
@@ -593,12 +677,17 @@ def run_full_modular_comparison(
             "fs": fs,
             "clean_n2_minutes": round(n2_minutes, 2),
             "custom_density_per_min": round(len(custom_spindles) / n2_minutes, 2) if n2_minutes > 0 else 0.0,
+            "bridged_density_per_min": round(len(bridged_spindles) / n2_minutes, 2) if n2_minutes > 0 else 0.0,
             "yasa_density_per_min": round(len(yasa_spindles) / n2_minutes, 2) if n2_minutes > 0 else 0.0,
         },
         "sample_level": sample_metrics,
-        "event_level": compact_event_metrics,
+        "bridged_sample_level": bridged_sample_metrics,
+        "event_level": _compact_ev(event_metrics),
+        "bridged_event_level": _compact_ev(bridged_event_metrics),
         "boundary_level": boundary_metrics,
+        "bridged_boundary_level": bridged_boundary_metrics,
         "feature_level": feature_metrics,
+        "bridged_feature_level": bridged_feature_metrics,
         "sweeps": sweeps,
         "examples": examples,
         "stage_level": stage_metrics,
@@ -611,43 +700,45 @@ if __name__ == "__main__":
 
     m = report["metadata"]
     s = report["sample_level"]
+    sb = report["bridged_sample_level"]
     e = report["event_level"]
+    eb = report["bridged_event_level"]
     b = report["boundary_level"]
+    bb = report["bridged_boundary_level"]
     f = report["feature_level"]
+    fb = report["bridged_feature_level"]
 
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 78)
     print(f" MODULAR SPINDLE BENCHMARK: {m['edf_name']} ({m['channel']}) | Clean N2: {m['clean_n2_minutes']} min")
-    print("=" * 72)
-    print(f" [1] SAMPLE-LEVEL (Point-by-Point on Clean N2)")
-    print(f"     Precision: {s['precision']*100:5.1f}% | Recall: {s['recall']*100:5.1f}% | F1: {s['f1']:.3f} | Cohen's κ: {s['cohen_kappa']:.3f} | MCC: {s['mcc']:.3f}")
-    print("-" * 72)
+    print("=" * 78)
+    print(f" [1] SAMPLE-LEVEL (Point-by-Point on Clean N2 vs. YASA)")
+    print(f"     Custom:  Prec: {s['precision']*100:5.1f}% | Rec: {s['recall']*100:5.1f}% | F1: {s['f1']:.3f} | κ: {s['cohen_kappa']:.3f} | MCC: {s['mcc']:.3f}")
+    print(f"     Bridged: Prec: {sb['precision']*100:5.1f}% | Rec: {sb['recall']*100:5.1f}% | F1: {sb['f1']:.3f} | κ: {sb['cohen_kappa']:.3f} | MCC: {sb['mcc']:.3f}")
+    print("-" * 78)
     print(f" [2] EVENT-LEVEL (1-to-1 Greedy Matching @ IoU >= {e['iou_threshold']})")
-    print(f"     Custom: {e['n_custom']} ({m['custom_density_per_min']}/min) | YASA: {e['n_yasa']} ({m['yasa_density_per_min']}/min)")
-    print(f"     TP: {e['tp']} | FP (Custom-only): {e['fp']} | FN (YASA-only): {e['fn']}")
-    print(f"     Precision: {e['precision']*100:5.1f}% | Recall: {e['recall']*100:5.1f}% | F1: {e['f1']:.3f} | Mean IoU: {e['mean_iou']:.3f}")
-    print("-" * 72)
-    if b:
-        print(f" [3] BOUNDARY PRECISION (Custom - YASA on {e['tp']} Matched Spindles)")
-        print(f"     Onset Bias:    {b['onset_error']['mean_ms']:+6.1f} ± {b['onset_error']['std_ms']:.1f} ms (MAE: {b['onset_error']['mae_ms']:.1f} ms)")
-        print(f"     Offset Bias:   {b['offset_error']['mean_ms']:+6.1f} ± {b['offset_error']['std_ms']:.1f} ms (MAE: {b['offset_error']['mae_ms']:.1f} ms)")
-        print(f"     Duration Bias: {b['duration_error']['mean_ms']:+6.1f} ± {b['duration_error']['std_ms']:.1f} ms (MAE: {b['duration_error']['mae_ms']:.1f} ms)")
-        print("-" * 72)
-    if f:
-        print(f" [4] MORPHOLOGICAL & SPECTRAL FEATURE AGREEMENT (Matched Spindles)")
-        print(f"     Duration (s):   Custom={f['dur']['custom_mean']:.2f} vs YASA={f['dur']['yasa_mean']:.2f} | r={f['dur']['pearson_r']:.3f} | Bias={f['dur']['bias']:+.2f}s")
-        print(f"     Amplitude (µV): Custom={f['peak_amp']['custom_mean']:.1f} vs YASA={f['peak_amp']['yasa_mean']:.1f} | r={f['peak_amp']['pearson_r']:.3f} | Bias={f['peak_amp']['bias']:+.1f}µV")
-        print(f"     Frequency (Hz): Custom={f['freq']['custom_mean']:.2f} vs YASA={f['freq']['yasa_mean']:.2f} | r={f['freq']['pearson_r']:.3f} | Bias={f['freq']['bias']:+.2f}Hz")
+    print(f"     Counts:  Custom={e['n_custom']} ({m['custom_density_per_min']}/min) | Bridged={eb['n_custom']} ({m['bridged_density_per_min']}/min) | YASA={e['n_yasa']} ({m['yasa_density_per_min']}/min)")
+    print(f"     Custom:  TP={e['tp']:3d} | FP={e['fp']:3d} | FN={e['fn']:3d} | Prec={e['precision']*100:5.1f}% | Rec={e['recall']*100:5.1f}% | F1={e['f1']:.3f} | IoU={e['mean_iou']:.3f}")
+    print(f"     Bridged: TP={eb['tp']:3d} | FP={eb['fp']:3d} | FN={eb['fn']:3d} | Prec={eb['precision']*100:5.1f}% | Rec={eb['recall']*100:5.1f}% | F1={eb['f1']:.3f} | IoU={eb['mean_iou']:.3f}")
+    print("-" * 78)
+    if b and bb:
+        print(f" [3] BOUNDARY PRECISION (Method - YASA on Matched Spindles)")
+        print(f"     Custom  Onset: {b['onset_error']['mean_ms']:+6.1f} ± {b['onset_error']['std_ms']:.1f} ms | Offset: {b['offset_error']['mean_ms']:+6.1f} ± {b['offset_error']['std_ms']:.1f} ms | Dur: {b['duration_error']['mean_ms']:+6.1f} ms")
+        print(f"     Bridged Onset: {bb['onset_error']['mean_ms']:+6.1f} ± {bb['onset_error']['std_ms']:.1f} ms | Offset: {bb['offset_error']['mean_ms']:+6.1f} ± {bb['offset_error']['std_ms']:.1f} ms | Dur: {bb['duration_error']['mean_ms']:+6.1f} ms")
+        print("-" * 78)
     st = report["stage_level"]
-    print("-" * 72)
-    print(f" [6] SPINDLES PER SLEEP STAGE (whole night, fixed threshold; Custom = {st['custom_thresh_uv']} µV)")
+    print(f" [6] SPINDLES PER SLEEP STAGE (Custom = {st['custom_thresh_uv']} µV, Peak = {st['custom_high_thresh_uv']} µV)")
     for row in st["stages"]:
         print(
             f"     {row['stage']:<5} {row['clean_minutes']:6.1f} min | "
             f"Custom {row['n_custom']:4d} ({row['custom_density']:.2f}/min) | "
-            f"YASA {row['n_yasa']:4d} ({row['yasa_density']:.2f}/min) | both {row['n_both']}"
+            f"Bridged {row['n_bridged']:4d} ({row['bridged_density']:.2f}/min) | "
+            f"YASA {row['n_yasa']:4d} ({row['yasa_density']:.2f}/min)"
         )
-    print("=" * 72)
+    print("=" * 78)
 
-    with open("spindle_comparison_report.json", "w") as fp:
+    from pathlib import Path
+    reports_dir = Path(__file__).resolve().parent.parent / "outputs" / "reports"
+    out_path = (reports_dir / "spindle_comparison_report.json") if reports_dir.exists() else (Path(__file__).resolve().parent / "spindle_comparison_report.json")
+    with open(out_path, "w") as fp:
         json.dump(report, fp, indent=2)
-    print("Saved detailed benchmark data to spindle_comparison_report.json")
+    print(f"Saved detailed benchmark data to {out_path}")

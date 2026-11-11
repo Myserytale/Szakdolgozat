@@ -9,6 +9,22 @@ HYPART_DIR = DATA_DIR / "hypart"
 
 edf_files = sorted(DATA_DIR.glob("*.edf"))
 
+# All 12 scalp EEG derivations present across the Guildford dataset
+EEG_CHANNELS = [
+    "Fp1",
+    "Fp2",
+    "F3",
+    "F4",
+    "C3",
+    "C4",
+    "T3",
+    "T4",
+    "P3",
+    "P4",
+    "O1",
+    "O2",
+]
+
 
 def decode_rle(values: np.ndarray, durations: np.ndarray) -> np.ndarray:
     """Expands run-length encoded pairs (value, duration) into a flat array."""
@@ -146,3 +162,50 @@ def load_recording(edf_name: str, channel: str):
     art_idx = matches[0]
 
     return signal, fs, hypnogram, artefacts, art_idx
+
+
+def load_multichannel_recording(
+    edf_name: str, channels: list[str] | tuple[str, ...] | None = None
+) -> tuple[dict[str, np.ndarray], int, np.ndarray, np.ndarray, dict[str, int]]:
+    """Loads multiple EEG channels (defaults to all 12 scalp channels) with hypnogram and artifact indices.
+
+    Parameters
+    ----------
+    edf_name : str
+        File name inside DATA_DIR, e.g. "BB0008_SP3.edf".
+    channels : list[str] | tuple[str, ...] | None, optional
+        EEG channel labels to load. Defaults to `EEG_CHANNELS` (all 12 scalp channels).
+
+    Returns
+    -------
+    signals : dict[str, np.ndarray]
+        Mapping of channel label -> 1D signal array.
+    fs : int
+        Sampling rate in Hz.
+    hypnogram : np.ndarray
+        Sleep stage per sample.
+    artefacts : np.ndarray
+        Artifact flag matrix (0 = clean).
+    art_idx_map : dict[str, int]
+        Mapping of channel label -> column index in `artefacts`.
+    """
+    target_channels = list(channels) if channels is not None else list(EEG_CHANNELS)
+    edf_path = DATA_DIR / edf_name
+    hypart_path = HYPART_DIR / f"{edf_path.stem}.hypart"
+
+    edf_data = read_edf(edf_path, channels=target_channels)
+    signals = edf_data["signals"]
+    fs = int(edf_data["sample_rates"][0])
+
+    hypnogram, artefacts, art_channels = load_hypart(hypart_path)
+
+    art_idx_map: dict[str, int] = {}
+    for ch in target_channels:
+        matches = [
+            i for i, name in enumerate(art_channels) if name.startswith(f"ArtiFFT {ch}-")
+        ]
+        if not matches:
+            raise ValueError(f"No artifact channel for '{ch}'. Available: {art_channels}")
+        art_idx_map[ch] = matches[0]
+
+    return signals, fs, hypnogram, artefacts, art_idx_map
