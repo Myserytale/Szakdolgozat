@@ -1,13 +1,16 @@
 from pathlib import Path
 import numpy as np
 import pyedflib
+from scipy.signal import butter, find_peaks, sosfiltfilt
 
 # Base directories (resolves relative to Szakdolg root or default path)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "Guildford"
 HYPART_DIR = DATA_DIR / "hypart"
 
 edf_files = sorted(DATA_DIR.glob("*.edf"))
+
+ECG_CHANNEL = "ECG1 ECG2"
 
 # All 12 scalp EEG derivations present across the Guildford dataset
 EEG_CHANNELS = [
@@ -209,3 +212,149 @@ def load_multichannel_recording(
         art_idx_map[ch] = matches[0]
 
     return signals, fs, hypnogram, artefacts, art_idx_map
+
+
+def detect_ecg_rpeaks(
+    ecg_raw: np.ndarray, fs: int
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Cleans an ECG trace and detects R-peaks using bandpass filtering and peak snapping.
+
+    Parameters
+    ----------
+    ecg_raw : np.ndarray
+        Raw 1D ECG signal array (mV).
+    fs : int
+        Sampling rate in Hz.
+
+    Returns
+    -------
+    ecg_clean : np.ndarray
+        0.5-40 Hz zero-phase bandpass-filtered ECG signal (mV).
+    rpeaks : np.ndarray
+        Sorted unique integer sample indices of detected R-peaks.
+    polarity : float
+        Detected dominant QRS polarity (+1.0 or -1.0).
+    """
+    ecg_arr = np.asarray(ecg_raw, dtype=np.float64)
+    sos_clean = butter(3, (0.5, 40.0), btype="bandpass", fs=fs, output="sos")
+    ecg_clean = sosfiltfilt(sos_clean, ecg_arr)
+
+    sos_qrs = butter(3, (5.0, 25.0), btype="bandpass", fs=fs, output="sos")
+    qrs = sosfiltfilt(sos_qrs, ecg_arr)
+
+    polarity = 1.0 if np.percentile(qrs, 99.0) >= np.percentile(-qrs, 99.0) else -1.0
+    oriented_qrs = polarity * qrs
+    prominence = float(np.percentile(oriented_qrs, 99.0) * 0.45)
+
+    if prominence <= 0.0:
+        return ecg_clean, np.array([], dtype=int), polarity
+
+    peaks, _ = find_peaks(oriented_qrs, distance=int(0.35 * fs), prominence=prominence)
+    if len(peaks) == 0:
+        return ecg_clean, np.array([], dtype=int), polarity
+
+    # Snap candidate peaks to the true R-wave apex on the 0.5-40 Hz cleaned waveform
+    half_win = int(0.04 * fs)
+    oriented_clean = polarity * ecg_clean
+    n_samples = len(ecg_clean)
+    snapped = np.empty_like(peaks)
+    for i, peak in enumerate(peaks):
+        s = max(0, int(peak) - half_win)
+        e = min(n_samples, int(peak) + half_win + 1)
+        snapped[i] = s + int(np.argmax(oriented_clean[s:e]))
+
+    rpeaks = np.unique(snapped).astype(int)
+    return ecg_clean, rpeaks, polarity
+
+
+def load_ecg(edf_name: str, channel: str = ECG_CHANNEL) -> dict:
+    """Loads the ECG channel from an EDF recording and extracts cleaned signal and R-peaks.
+
+    Parameters
+    ----------
+    edf_name : str
+        File name inside DATA_DIR, e.g. "BB0008_SP3.edf".
+    channel : str, optional
+        ECG channel label in the EDF file. Defaults to `ECG_CHANNEL` ("ECG1 ECG2").
+
+    Returns
+    -------
+    dict with keys:
+        - 'ecg_raw': 1D numpy array (mV)
+        - 'ecg_clean': 1D numpy array (0.5-40 Hz filtered, mV)
+        - 'fs': int sampling rate in Hz
+        - 'rpeaks': 1D integer numpy array of R-peak sample indices
+        - 'polarity': float (+1.0 or -1.0)
+        - 'y_lim_mv': float recommended symmetric y-axis limit in mV
+    """
+    edf_path = DATA_DIR / edf_name
+    edf_data = read_edf(edf_path, channels=[channel])
+    ecg_raw = np.asarray(edf_data["signals"][channel], dtype=np.float64)
+    fs = int(edf_data["sample_rates"][0])
+
+    ecg_clean, rpeaks, polarity = detect_ecg_rpeaks(ecg_raw, fs)
+    p998 = float(np.percentile(np.abs(ecg_clean), 99.8)) if len(ecg_clean) > 0 else 0.5
+    y_lim_mv = float(np.clip(np.ceil(p998 * 1.35 * 20.0) / 20.0, 0.20, 2.0))
+
+    return {
+        "ecg_raw": ecg_raw,
+        "ecg_clean": ecg_clean,
+        "fs": fs,
+        "rpeaks": rpeaks,
+        "polarity": polarity,
+        "y_lim_mv": y_lim_mv,
+    }
+
+
+def compute_epoch_ecg_stats(
+    rpeaks: np.ndarray, start: int, end: int, fs: int
+) -> dict:
+    """Computes beat count, heart rate, and basic RR statistics for a sample interval.
+
+    Parameters
+    ----------
+    rpeaks : np.ndarray
+        Sorted integer array of R-peak sample indices for the recording.
+    start : int
+        Epoch start sample index (inclusive).
+    end : int
+        Epoch end sample index (exclusive).
+    fs : int
+        Sampling rate in Hz.
+
+    Returns
+    -------
+    dict with keys 'rpeaks', 'n_beats', 'hr_bpm', 'mean_rr_ms', 'sdnn_ms'.
+    """
+    ep_peaks = rpeaks[(rpeaks >= start) & (rpeaks < end)]
+    n_beats = int(len(ep_peaks))
+    if n_beats < 2:
+        return {
+            "rpeaks": ep_peaks,
+            "n_beats": n_beats,
+            "hr_bpm": float("nan"),
+            "mean_rr_ms": float("nan"),
+            "sdnn_ms": float("nan"),
+        }
+
+    rr_ms = np.diff(ep_peaks) / float(fs) * 1000.0
+    valid_rr = rr_ms[(rr_ms >= 300.0) & (rr_ms <= 2000.0)]
+    if len(valid_rr) == 0:
+        return {
+            "rpeaks": ep_peaks,
+            "n_beats": n_beats,
+            "hr_bpm": float("nan"),
+            "mean_rr_ms": float("nan"),
+            "sdnn_ms": float("nan"),
+        }
+
+    hr_bpm = float(np.mean(60000.0 / valid_rr))
+    mean_rr_ms = float(np.mean(valid_rr))
+    sdnn_ms = float(np.std(valid_rr, ddof=1)) if len(valid_rr) >= 2 else float("nan")
+    return {
+        "rpeaks": ep_peaks,
+        "n_beats": n_beats,
+        "hr_bpm": hr_bpm,
+        "mean_rr_ms": mean_rr_ms,
+        "sdnn_ms": sdnn_ms,
+    }

@@ -1,7 +1,10 @@
+from pathlib import Path
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import welch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "core"))
 from reading_working import load_recording
 
 # 1. Settings & Channel Selection

@@ -6,13 +6,23 @@ directly from `spindles_csv/{custom,bridged,yasa}/<recording>.csv` for instant
 startup and fast switching across recordings.
 """
 
+from pathlib import Path
+import sys
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
 
+_PKG_DIR = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(_PKG_DIR / "core"), str(_PKG_DIR / "spindles")]
+
 from export_spindles_csv import export_spindles_for_recording
-from reading_working import edf_files, load_recording
+from reading_working import (
+    compute_epoch_ecg_stats,
+    edf_files,
+    load_ecg,
+    load_recording,
+)
 from spindles import (
     SPINDLES_CSV_DIR,
     filter_spindles_min_coincidence,
@@ -49,6 +59,7 @@ show_bridged = True
 show_yasa = True
 show_artifacts = True
 filter_min_channels = True  # Toggleable with button ">=5 Ch: ON/OFF" or key "5"
+show_rpeaks = True
 
 # State variables populated by load_current_recording()
 edf_name = ""
@@ -60,6 +71,9 @@ sigma = np.array([])
 envelope = np.array([])
 sigma_thresh = 0.0
 sigma_high_thresh = 0.0
+ecg_clean = np.array([])
+ecg_rpeaks = np.array([], dtype=int)
+ecg_y_lim = 0.5
 epoch_len = 7680
 n_epochs = 1
 t = np.array([])
@@ -73,16 +87,26 @@ yasa_spindles: list[dict] = []
 
 
 def load_current_recording():
-    """Loads EEG, hypnogram, artifacts, and CSV spindles for `edf_names[current_rec_idx]`."""
+    """Loads EEG, EKG, hypnogram, artifacts, and CSV spindles for `edf_names[current_rec_idx]`."""
     global edf_name, signal, fs, hypnogram, art_mask, sigma, envelope
-    global sigma_thresh, sigma_high_thresh, epoch_len, n_epochs, t
+    global sigma_thresh, sigma_high_thresh, ecg_clean, ecg_rpeaks, ecg_y_lim
+    global epoch_len, n_epochs, t
     global art_epochs, n_art_epochs, art_pct, art_intervals
     global custom_spindles, bridged_spindles, yasa_spindles, current_epoch
 
     edf_name = edf_names[current_rec_idx]
-    print(f"Loading recording {edf_name} ({channel}) & spindle CSVs...")
+    print(f"Loading recording {edf_name} ({channel}), EKG & spindle CSVs...")
     signal, fs, hypnogram, artefacts, art_idx = load_recording(edf_name, channel)
     art_mask = artefacts[:, art_idx] != 0
+
+    ecg_data = load_ecg(edf_name)
+    if ecg_data["fs"] != fs:
+        raise ValueError(
+            f"Sampling rate mismatch for {edf_name}: EEG={fs} Hz vs EKG={ecg_data['fs']} Hz"
+        )
+    ecg_clean = ecg_data["ecg_clean"]
+    ecg_rpeaks = ecg_data["rpeaks"]
+    ecg_y_lim = ecg_data["y_lim_mv"]
 
     is_n2 = (hypnogram == 2) & (~art_mask)
     sos = butter(4, (11, 16), btype="bandpass", fs=fs, output="sos")
@@ -136,11 +160,11 @@ def get_active_spindles(spindles: list[dict]) -> list[dict]:
 
 load_current_recording()
 
-# 2. Figure Layout: Hypnogram (top), Raw EEG (middle), Sigma 11-16 Hz (bottom)
-fig, (ax_hyp, ax_eeg, ax_sig) = plt.subplots(
-    3, 1, figsize=(13, 7.5), gridspec_kw={"height_ratios": [1, 2.5, 1.5]}
+# 2. Figure Layout: Hypnogram (top), Raw EEG, Sigma 11-16 Hz, EKG (bottom)
+fig, (ax_hyp, ax_eeg, ax_sig, ax_ecg) = plt.subplots(
+    4, 1, figsize=(13, 8.8), gridspec_kw={"height_ratios": [1, 2.3, 1.3, 1.3]}
 )
-plt.subplots_adjust(bottom=0.20, hspace=0.32)
+plt.subplots_adjust(bottom=0.16, top=0.95, hspace=0.35)
 
 hyp_cursor = None
 eeg_line = None
@@ -148,6 +172,8 @@ sig_line = None
 env_line = None
 base_thresh_line = None
 peak_thresh_line = None
+ecg_line = None
+rpeak_line = None
 art_span_col = None
 art_bar_col = None
 highlights = []
@@ -169,11 +195,12 @@ def update_hypnogram_title():
 def rebuild_recording_axes():
     """Draws the full-night hypnogram and initializes trace lines for the loaded recording."""
     global hyp_cursor, eeg_line, sig_line, env_line, base_thresh_line, peak_thresh_line
-    global art_span_col, art_bar_col
+    global ecg_line, rpeak_line, art_span_col, art_bar_col
 
     ax_hyp.clear()
     ax_eeg.clear()
     ax_sig.clear()
+    ax_ecg.clear()
 
     hyp_epochs = hypnogram[: n_epochs * epoch_len : epoch_len].astype(float)
     hyp_epochs[hyp_epochs == 9] = np.nan
@@ -252,12 +279,25 @@ def rebuild_recording_axes():
     )
     ax_sig.set_xlim(0, epoch_sec)
     ax_sig.set_ylim(-35, 35)
-    ax_sig.set_xlabel(
-        "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W spindle | E/Q artifact | [/] rec | ↑/↓ zoom µV | 1/2/3/4/5 toggle]"
-    )
     ax_sig.set_ylabel("Sigma (µV)")
     ax_sig.grid(True, linestyle="--", alpha=0.35)
     ax_sig.legend(loc="upper right", fontsize=8, ncol=4)
+
+    # Bottom: EKG (0.5-40 Hz) + R-peaks
+    (ecg_line,) = ax_ecg.plot(
+        t, ecg_clean[:epoch_len], color="#00796b", linewidth=0.8, label="EKG (0.5–40 Hz)"
+    )
+    (rpeak_line,) = ax_ecg.plot(
+        [], [], "o", color="#d62728", markersize=4.0, label="R-peaks"
+    )
+    ax_ecg.set_xlim(0, epoch_sec)
+    ax_ecg.set_ylim(-ecg_y_lim, ecg_y_lim)
+    ax_ecg.set_xlabel(
+        "Time within epoch (s)   [Keys: ◀/▶ epoch | S/W spindle | E/Q artifact | [/] rec | ↑/↓ EEG µV | -/= EKG mV | 1/2/3/4/5/R toggle]"
+    )
+    ax_ecg.set_ylabel("EKG (mV)")
+    ax_ecg.grid(True, linestyle="--", alpha=0.35)
+    ax_ecg.legend(loc="upper right", fontsize=8, ncol=2)
 
 
 def draw_spindles(spindles, start, end, color, edge, y_pos, tag):
@@ -321,6 +361,28 @@ def update_view():
     sig_line.set_ydata(sigma[start:end])
     env_line.set_ydata(envelope[start:end])
 
+    ecg_line.set_ydata(ecg_clean[start:end])
+    ax_ecg.set_ylim(-ecg_y_lim, ecg_y_lim)
+    ecg_stats = compute_epoch_ecg_stats(ecg_rpeaks, start, end, fs)
+    if show_rpeaks and len(ecg_stats["rpeaks"]) > 0:
+        rpeak_line.set_data(
+            (ecg_stats["rpeaks"] - start) / fs, ecg_clean[ecg_stats["rpeaks"]]
+        )
+    else:
+        rpeak_line.set_data([], [])
+    hr_str = (
+        f"{ecg_stats['hr_bpm']:.1f} bpm"
+        if not np.isnan(ecg_stats["hr_bpm"])
+        else "-- bpm"
+    )
+    ecg_line.set_label(f"EKG (0.5–40 Hz, ±{ecg_y_lim:.2f} mV)")
+    rpeak_line.set_label(
+        f"R-peaks ({ecg_stats['n_beats']} beats, {hr_str})"
+        if show_rpeaks
+        else "R-peaks (OFF)"
+    )
+    ax_ecg.legend(loc="upper right", fontsize=8, ncol=2)
+
     # Shade exact artifact intervals within the epoch in red
     art_ep = art_mask[start:end]
     if show_artifacts and np.any(art_ep):
@@ -363,7 +425,8 @@ def update_view():
     ch_tag = f">={min_channels_threshold}ch" if filter_min_channels else "1+ch"
     ax_eeg.set_title(
         f"[{edf_name}] Epoch {current_epoch + 1}/{n_epochs} | {time_str} | {stage_names.get(stage, stage)} "
-        f"| [{art_status}] | CSV ({ch_tag}) — Custom: {c_cnt}  Bridged: {b_cnt}  YASA: {y_cnt} | Scale: ±{int(y_lim)} µV",
+        f"| [{art_status}] | HR: {hr_str} ({ecg_stats['n_beats']} beats) | "
+        f"CSV ({ch_tag}) — C: {c_cnt}  B: {b_cnt}  Y: {y_cnt} | ±{int(y_lim)} µV",
         fontsize=10.5,
         fontweight="bold",
     )
@@ -474,6 +537,12 @@ def toggle_min_channels(event=None):
     update_view()
 
 
+def toggle_rpeaks(event=None):
+    global show_rpeaks
+    show_rpeaks = not show_rpeaks
+    update_view()
+
+
 def on_click(event):
     global current_epoch
     if event.inaxes is ax_hyp and event.xdata is not None:
@@ -482,7 +551,7 @@ def on_click(event):
 
 
 def on_key(event):
-    global y_lim
+    global y_lim, ecg_y_lim
     if event.key in ("right", "d"):
         step_epoch(1)
     elif event.key in ("left", "a"):
@@ -505,6 +574,12 @@ def on_key(event):
     elif event.key == "down":
         y_lim = min(400.0, y_lim + 25.0)
         update_view()
+    elif event.key in ("-", "_"):
+        ecg_y_lim = min(3.0, round(ecg_y_lim + 0.05, 2))
+        update_view()
+    elif event.key in ("=", "+"):
+        ecg_y_lim = max(0.05, round(ecg_y_lim - 0.05, 2))
+        update_view()
     elif event.key == "1":
         toggle_custom()
     elif event.key == "2":
@@ -515,6 +590,8 @@ def on_key(event):
         toggle_artifacts()
     elif event.key == "5":
         toggle_min_channels()
+    elif event.key in ("r", "R"):
+        toggle_rpeaks()
 
 
 fig.canvas.mpl_connect("button_press_event", on_click)

@@ -6,8 +6,13 @@ PSD of the binary spindle signal vs. the permutated reference signal,
 shown for one specific recording (left) and averaged across all EDF files (right).
 """
 
+from pathlib import Path
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
+
+_PKG_DIR = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(_PKG_DIR / "core"), str(_PKG_DIR / "spindles")]
 
 from infraslow import compute_eip
 from reading_working import edf_files, load_recording

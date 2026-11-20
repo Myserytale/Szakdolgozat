@@ -12,11 +12,14 @@ Evaluates Custom (SciPy Hilbert) vs. YASA spindle detection across five modules:
 
 from dataclasses import dataclass, asdict
 import json
+from pathlib import Path
+import sys
 import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
 from scipy.stats import pearsonr
 import yasa
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "core"))
 from spindles import (
     create_spindle_mask,
     detect_custom_spindles,
@@ -736,8 +739,7 @@ if __name__ == "__main__":
         )
     print("=" * 78)
 
-    from pathlib import Path
-    reports_dir = Path(__file__).resolve().parent.parent / "outputs" / "reports"
+    reports_dir = Path(__file__).resolve().parents[2] / "outputs" / "reports"
     out_path = (reports_dir / "spindle_comparison_report.json") if reports_dir.exists() else (Path(__file__).resolve().parent / "spindle_comparison_report.json")
     with open(out_path, "w") as fp:
         json.dump(report, fp, indent=2)

@@ -18,8 +18,8 @@ from scipy.signal import butter, hilbert, sosfiltfilt
 import yasa
 
 SPINDLES_CSV_DIR = (
-    Path(__file__).resolve().parent.parent / "outputs" / "spindles_csv"
-    if (Path(__file__).resolve().parent.parent / "outputs" / "spindles_csv").exists()
+    Path(__file__).resolve().parents[2] / "outputs" / "spindles_csv"
+    if (Path(__file__).resolve().parents[2] / "outputs" / "spindles_csv").exists()
     else Path(__file__).resolve().parent / "spindles_csv"
 )
 

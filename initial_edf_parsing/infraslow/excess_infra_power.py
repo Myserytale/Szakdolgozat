@@ -6,9 +6,14 @@ Same method as fsa.py (see infraslow.py), plus:
   - a 500 s time trace showing the slowly changing spindle rate
 """
 
+from pathlib import Path
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal.windows import gaussian
+
+_PKG_DIR = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(_PKG_DIR / "core"), str(_PKG_DIR / "spindles")]
 
 from infraslow import compute_eip, integrated_eip
 from reading_working import load_recording

@@ -1,0 +1,55 @@
+{
+  "SLEEPTIMEFILE": "$GUILDFORD/Bed-Wake_times_25MAY2010_final.csv",
+  "REMOVESTARTUPWAKE": false,
+  "FS": 256.0,
+  "splitting": {
+    "by": "length",
+    "param": 1200
+  },
+  "ACTIVE_PROFILE": "kubios_like",
+  "ANALYSIS_PROFILES": {
+    "default": {
+      "OUTFOLDER": "/home/zsolt/kutatas/eeg/guildford/ecgexport1/ecg_analysis_hypno_only_default/",
+      "ECG_CLEAN_METHOD": "neurokit",
+      "ECG_PEAKS_METHOD": "neurokit",
+      "CORRECT_ARTIFACTS_IN_ECG_PEAKS": false,
+      "USE_SIGNAL_FIXPEAKS": false,
+      "SIGNAL_FIXPEAKS_METHOD": "Kubios",
+      "SIGNAL_FIXPEAKS_ITERATIVE": true,
+      "RR_MIN_MS": 300.0,
+      "RR_MAX_MS": 2000.0
+    },
+    "kubios_like": {
+      "OUTFOLDER": "/home/zsolt/kutatas/eeg/guildford/ecgexport1/ecg_analysis_hypno_only_0b_kubios_like/",
+      "ECG_CLEAN_METHOD": "neurokit",
+      "ECG_PEAKS_METHOD": "neurokit",
+      "CORRECT_ARTIFACTS_IN_ECG_PEAKS": true,
+      "USE_SIGNAL_FIXPEAKS": true,
+      "SIGNAL_FIXPEAKS_METHOD": "Kubios",
+      "SIGNAL_FIXPEAKS_ITERATIVE": true,
+      "RR_MIN_MS": 300.0,
+      "RR_MAX_MS": 2000.0,
+      "HRV_FREQUENCY_PSD_METHOD": "welch",
+      "HRV_FREQUENCY_INTERPOLATION_RATE": 4
+    }
+  },
+  "MIN_SECONDS_FOR_ANALYSIS": 10,
+  "QUALITY_BAD_THRESHOLD": 0.5,
+  "FILTER_MIN_LENGTH_SEC": 30,
+  "FILTER_MIN_QUALITY_MEAN": 0.6,
+  "FILTER_MAX_ARTEFACT_FRACTION": 0.2,
+  "FILTER_MIN_VALID_BEATS_FRACTION": 0.8,
+  "FILTER_MIN_BEATS_KEPT": 20,
+  "COMPUTE_FREQUENCY_DOMAIN_HRV": true,
+  "COMPUTE_NONLINEAR_HRV": true,
+  "MIN_BEATS_FOR_BASIC_RATE": 2,
+  "MIN_BEATS_FOR_TIME_HRV": 3,
+  "MIN_BEATS_FOR_ADVANCED_HRV": 20,
+  "MIN_LENGTH_SEC_FOR_ADVANCED_HRV": 60,
+  "HYPNO_STAGE_MAP": {},
+  "ECG_QUALITY_METHOD": "averageQRS",
+  "EDF_EEG_CHANNELS": [
+    "C3"
+  ],
+  "ECG_COLUMN_INDEX": 1
+}

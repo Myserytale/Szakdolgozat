@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from spindle_eval import run_full_modular_comparison
 
-_reports_dir = Path(__file__).resolve().parent.parent / "outputs" / "reports"
+_reports_dir = Path(__file__).resolve().parents[2] / "outputs" / "reports"
 REPORT_PATH = (
     (_reports_dir / "spindle_comparison_report.json")
     if _reports_dir.exists()

@@ -5,6 +5,7 @@
 !.gitignore
 !README.md
 !requirements.txt
+!analysis/
 !initial_edf_parsing/
 !literature/
 !pyeeg/
@@ -20,5 +21,7 @@ archives/
 
 # Ignore large generated data outputs by default (keep source code clean)
 outputs/spindles_csv/
-initial_edf_parsing/spindles_csv/
-initial_edf_parsing/*.csv
+outputs/ecg_csv/
+initial_edf_parsing/**/spindles_csv/
+initial_edf_parsing/**/*.csv
+analysis/*.csv

@@ -13,9 +13,11 @@ Columns: start_s, end_s, length_s, sleep_stage, amplitude_uV, frequency_Hz, n_ch
 import argparse
 import csv
 from pathlib import Path
+import sys
 import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "core"))
 from reading_working import EEG_CHANNELS, edf_files, load_multichannel_recording, load_recording
 from spindles import (
     SPINDLES_CSV_DIR,
